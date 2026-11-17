@@ -42,6 +42,24 @@ struct MainView: View {
             if closed { keepsSidebarWithFile = false }
         }
         .focusedSceneValue(\.openPalette, PaletteAction { navigation.isPaletteOpen = true })
+        .alert("Make lecture briefs on this Mac?", isPresented: Binding(
+            get: { model.briefs.shouldAsk },
+            set: { _ in }
+        )) {
+            Button("Turn On") { Task { await model.setOnDeviceBriefs(true) } }
+            Button("Not Now", role: .cancel) { Task { await model.setOnDeviceBriefs(false) } }
+        } message: {
+            Text("Laer can use Apple Intelligence to write a short brief for upcoming lectures from the readings you save. It runs on this Mac and nothing is sent anywhere. You can change this later in the Laer menu.")
+        }
+        // A file opened from the menu bar shows its course on Plans, where the file lives.
+        .onAppear(perform: takePlansTabRequest)
+        .onChange(of: model.plansTabRequest) { _, _ in takePlansTabRequest() }
+    }
+
+    private func takePlansTabRequest() {
+        guard let id = model.plansTabRequest else { return }
+        navigation.courseTabs[id] = .plans
+        model.plansTabRequest = nil
     }
 
     /// The wider top edge of the frame: room for the window buttons, then the sidebar toggle.

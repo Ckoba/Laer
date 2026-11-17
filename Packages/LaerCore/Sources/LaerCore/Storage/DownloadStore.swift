@@ -91,6 +91,13 @@ public actor DownloadStore {
         downloadsDirectory.appendingPathComponent(asset.relativePath)
     }
 
+    /// The same location without a hop onto the actor, for opening a known file in the current frame.
+    /// Nil when the bytes are no longer on disk.
+    public nonisolated func fileURLIfPresent(for asset: LocalAsset) -> URL? {
+        let url = downloadsDirectory.appendingPathComponent(asset.relativePath)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
     /// Explicit user removal. The manifest is updated first so a failure leaves the file usable.
     public func remove(resourceKey: String) throws {
         var current = loadEntries()

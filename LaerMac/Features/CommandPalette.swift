@@ -66,6 +66,10 @@ struct CommandPalette: View {
         }
         // Focus after the overlay is in the window, or the field never takes it.
         .task {
+            if let preset = navigation.paletteKind {
+                kind = preset
+                navigation.paletteKind = nil
+            }
             try? await Task.sleep(for: .milliseconds(50))
             isFieldFocused = true
         }

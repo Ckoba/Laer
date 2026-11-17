@@ -16,6 +16,7 @@ final class LaerScreenshotUITests: XCTestCase {
         app.launchArguments += [
             "-ApplePersistenceIgnoreState", "YES", "-LaerUITestReset", "YES",
             "-LaerFixtureMode", "YES", "-LaerFixtureStress", "YES", "-LaerUITestAppearance", appearance,
+            "-showsSidebar", "YES", "-viewerPagesLocked", "NO",
         ]
         app.launch()
         let any = app.descendants(matching: .any)

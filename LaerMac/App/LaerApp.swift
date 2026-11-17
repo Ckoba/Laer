@@ -5,6 +5,10 @@ import SwiftUI
 struct LaerApp: App {
     @State private var model = AppModel()
     @State private var updater = Updater()
+    /// The Laer menu turns the menu bar icon on and off; removing it from the menu bar turns this off too.
+    @AppStorage(LaerApp.showsMenuBarKey) private var showsMenuBarExtra = true
+
+    static let showsMenuBarKey = "showsMenuBarExtra"
 
     var body: some Scene {
         Window("Laer", id: "main") {
@@ -28,5 +32,15 @@ struct LaerApp: App {
                     .disabled(updater.isBusy)
             }
         }
+
+        MenuBarExtra(isInserted: $showsMenuBarExtra) {
+            MenuBarView()
+                .environment(model)
+                .tint(Color.accent)
+        } label: {
+            Image(systemName: Symbol.course)
+                .accessibilityLabel("Laer")
+        }
+        .menuBarExtraStyle(.window)
     }
 }

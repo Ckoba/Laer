@@ -7,8 +7,14 @@ struct LaerCommands: Commands {
     @FocusedBinding(\.courseTab) private var courseTab
     @FocusedValue(\.refreshCurrent) private var refreshCurrent
     @FocusedValue(\.openPalette) private var openPalette
+    @AppStorage(LaerApp.showsMenuBarKey) private var showsMenuBarExtra = true
 
     var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Tab") { model.openNewTab() }
+                .keyboardShortcut("t", modifiers: .command)
+                .disabled(!isReady)
+        }
         CommandGroup(after: .toolbar) {
             Button("Refresh") {
                 let current = refreshCurrent
@@ -56,11 +62,13 @@ struct LaerCommands: Commands {
             }
         }
         CommandGroup(after: .appSettings) {
-            Button(model.notesFolderName == nil ? "Choose Lecture Notes Folder…" : "Change Lecture Notes Folder…") {
-                Task { await model.chooseNotesFolder() }
-            }
-            if let name = model.notesFolderName {
-                Button("Stop Reading “\(name)”") { model.forgetNotesFolder() }
+            Toggle("Show Laer in Menu Bar", isOn: $showsMenuBarExtra)
+            // Shown only where Apple's on-device model can run. Off until the person turns it on (decision 0014).
+            if model.briefs.isAvailable {
+                Toggle("Make Lecture Briefs on This Mac", isOn: Binding(
+                    get: { model.briefs.isEnabled },
+                    set: { enabled in Task { await model.setOnDeviceBriefs(enabled) } }
+                ))
             }
             Divider()
             Button("Sign out") { Task { await model.signOut() } }

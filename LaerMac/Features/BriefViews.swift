@@ -10,7 +10,7 @@ struct BriefSummary: View {
             BriefLabel(title: "No teaching expected")
         } else if let section = note.brief?.summary {
             VStack(alignment: .leading, spacing: Space.s2) {
-                BriefLabel(title: "Brief")
+                BriefLabel(title: note.isGenerated ? "Brief · made on this Mac" : "Brief")
                 Text(BriefMarkdown.text(section.displayText(linkScheme: nil)))
                     .font(Type.t12)
                     .foregroundStyle(Color.text)
@@ -29,7 +29,7 @@ struct BriefBlock: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s8) {
-            BriefLabel(title: note.status == .noTeaching ? "Brief · No teaching expected" : "Brief")
+            BriefLabel(title: note.status == .noTeaching ? "Brief · No teaching expected" : note.isGenerated ? "Brief · made on this Mac" : "Brief")
             ForEach(note.brief?.sections ?? []) { section in
                 VStack(alignment: .leading, spacing: Space.s2) {
                     if let title = section.title {
@@ -49,10 +49,8 @@ struct BriefBlock: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .environment(\.openURL, OpenURLAction { url in
-            if url.scheme == AppModel.noteLinkScheme {
-                // SwiftUI calls this on the main thread.
-                return MainActor.assumeIsolated { model.openNoteLink(url) } ? .handled : .discarded
-            }
+            // Links to other notes have nowhere to go now that briefs come only from this Mac.
+            if url.scheme == AppModel.noteLinkScheme { return .discarded }
             return .systemAction
         })
     }

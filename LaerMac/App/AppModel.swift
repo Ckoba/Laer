@@ -63,6 +63,10 @@ final class AppModel {
             if let index = viewerTabs.firstIndex(where: { $0.id == viewerItem.id }) {
                 // The same tab, now holding the file that was on its way.
                 if viewerTabs[index] != viewerItem { viewerTabs[index] = viewerItem }
+            } else if let old = oldValue, old.isNewTab, !viewerItem.isNewTab,
+                      let index = viewerTabs.firstIndex(where: { $0.id == old.id }) {
+                // A file picked from a New tab takes that tab's place.
+                viewerTabs[index] = viewerItem
             } else {
                 viewerTabs.append(viewerItem)
             }
@@ -70,8 +74,19 @@ final class AppModel {
     }
     private(set) var viewerTabs: [ViewerItem] = []
     var viewerWidth: CGFloat?
+    /// A course whose Plans tab should come forward, set when a file opens from the menu bar.
+    var plansTabRequest: Int?
+    @ObservationIgnored var readingPrefetch: Task<Void, Never>?
+    /// Links the person keeps on Home and in the menu bar, such as exam or mail sites. See `AppModel+Home`.
+    var studyLinks: [StudyLink] = StudyLink.saved()
+    var examPlan = ExamPlanState()
     var viewerIsFull = false
     var convertedFiles: [String: URL] = [:]
+    /// Slide decks the person switched to their original file. The PDF view stays the default.
+    var slidesShownAsOriginal: Set<String> = []
+    /// Files opened in the viewer, newest first, for the New tab page. See `AppModel+NewTab`.
+    var recentFiles: [RecentFile] = []
+    var recentFilesPersonId: Int?
     var starredIds: Set<Int> = []
     var searchIndex = SearchIndex()
     var searchIndexedAt: Date?
@@ -82,11 +97,8 @@ final class AppModel {
     private(set) var updatesState: [Int: CollectionState] = [:]
     private(set) var plans: [Int: [PlanPreview]] = [:]
     private(set) var plansState: [Int: CollectionState] = [:]
-    /// Lecture-prep notes from the folder the user picked, read-only. See `AppModel+Notes`.
-    var lectureNotes: [LectureNote] = []
-    var notesFolderName: String?
-    @ObservationIgnored var notesReadAt: Date?
-    let notesFolder = NotesFolder()
+    /// Briefs made on this Mac from saved readings. See `AppModel+Briefs`.
+    let briefs = LectureBriefs()
     private(set) var tasks: [StudyTask] = []
     private(set) var tasksState = CollectionState()
     private(set) var resources: [String: [Resource]] = [:]
@@ -387,6 +399,7 @@ final class AppModel {
         if case .ready(let current) = authState, current.personId != person.personId {
             resetAccountState()
         }
+        loadRecentFiles(personId: person.personId)
         var root = Self.storageRoot()
         #if DEBUG
         if let fixtureRoot { root = fixtureRoot }
@@ -398,6 +411,7 @@ final class AppModel {
         snapshots = SnapshotStore(rootDirectory: root, accountKey: accountKey)
         let store = DownloadStore(rootDirectory: root, accountKey: accountKey)
         downloads = store
+        await briefs.open(root: root, accountKey: accountKey)
         // Everything saved loads first, so the first frame is already complete.
         for asset in await store.allAssets() {
             savedAssets[asset.id] = asset
@@ -451,6 +465,7 @@ final class AppModel {
         generation += 1
         await coordinator.invalidate(generation: generation)
         pollTask?.cancel()
+        forgetRecentFiles()
         resetAccountState()
         UserDefaults.standard.removeObject(forKey: Self.personKey)
         if let site {
@@ -489,11 +504,15 @@ final class AppModel {
         selection = .home
         closeViewer()
         convertedFiles = [:]
+        slidesShownAsOriginal = []
+        recentFiles = []
+        recentFilesPersonId = nil
         starredIds = []
         searchIndex = SearchIndex()
         searchIndexedAt = nil
         snapshots = nil
         downloads = nil
+        briefs.close()
     }
 
     private static func storageRoot() -> URL {
@@ -552,6 +571,7 @@ final class AppModel {
         }
         Task(priority: .utility) {
             await prefetchActiveCourses()
+            scheduleBriefsForUpcoming()
             await refreshSearchIndexIfStale()
         }
     }
@@ -781,6 +801,7 @@ final class AppModel {
             // A newer copy makes any earlier slide conversion stale.
             SlideConverter.removeCached(for: resource.id)
             convertedFiles[resource.id] = nil
+            scheduleBrief(forReading: resource)
         } catch DownloadError.notADocument {
             downloadStates[resource.id] = .failed("This item only opens on the website.")
         } catch FileAcquirerError.websiteOnly {
@@ -839,6 +860,7 @@ final class AppModel {
                 contentType: "application/pdf", at: Date()
             )
             downloadStates[resource.id] = .idle
+            scheduleBrief(forReading: resource)
         } catch {
             downloadStates[resource.id] = .failed("The download failed.")
         }

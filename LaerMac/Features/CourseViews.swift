@@ -187,7 +187,6 @@ struct PlansView: View {
         }
         .dividedRows()
         .task {
-            await model.loadLectureNotes()
             await model.loadPlans(courseId: course.courseId)
         }
     }

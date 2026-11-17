@@ -242,6 +242,31 @@ final class FixtureWrites: @unchecked Sendable {
 
 /// Saved-file bytes for fixture mode, so "open saved material" works without the network.
 enum FixtureFiles {
+    /// A made-up reading about a fictional place, one entry per page. Not real course material.
+    static let reading = [
+        """
+        Shared water in the Varden valley. This chapter asks why the farmers of the fictional Varden valley kept a common irrigation system working for three centuries while neighbouring valleys did not. The author argues that durable commons depend less on altruism than on rules that members can monitor cheaply.
+
+        The valley's canal was owned by no single household. Each spring the canal council assigned turns, called water slots, in proportion to land farmed. A slot gave a household the right to open its gate for a fixed number of hours. Because every gate was visible from the main path, anyone walking past could see who was taking water out of turn. The author calls this low-cost monitoring and treats it as the first condition of a stable commons.
+
+        The second condition is graduated sanctions. A first offence brought a small fine paid in labour on the canal. Repeated offences brought larger fines and, in rare cases, the loss of a slot for a season. The chapter stresses that most penalties were mild: the aim was to signal that rules were watched, not to ruin the offender.
+        """,
+        """
+        The third condition is local rule-making. Rules in Varden were changed at an annual meeting where every slot holder could speak. When a drought shortened the season, the meeting cut every slot by the same share rather than letting upstream households take what they could. The author contrasts this with the neighbouring Hollin valley, where a distant landlord set the rules and farmers had no say. In Hollin, people took water at night, monitoring broke down, and the canal silted up within two generations.
+
+        The chapter then turns to conflict resolution. Disputes in Varden went first to two elected canal wardens and only then to the full council. Cheap and fast settlement kept small quarrels from turning into feuds. The author links this to trust: when people expect a fair hearing, they are more willing to follow rules they did not choose.
+
+        Finally the author considers outside pressure. When a regional authority tried to replace the council with a salaried water office, payments rose and monitoring fell, because farmers no longer saw the rules as their own. The council was restored after a decade.
+        """,
+        """
+        In the conclusion the author draws three lessons. First, a commons survives when the people who use it can see, cheaply and often, whether others follow the rules. Second, sanctions should start small and grow with repetition, so that one mistake does not break cooperation. Third, the people bound by the rules must be able to change them; rules imposed from outside invite quiet evasion.
+
+        The author warns against reading Varden as proof that small communities always manage commons well. Varden had stable membership, clear boundaries and a resource that was easy to measure in hours of flow. Where any of these is missing, the same institutions may fail. The chapter ends by asking whether the design principles carry over to resources that are hard to observe, such as groundwater or fish stocks, and suggests that new monitoring technology may matter more than new rules.
+
+        Key terms used in the chapter: common-pool resource, water slot, low-cost monitoring, graduated sanctions, collective-choice arrangements, nested enterprises.
+        """,
+    ]
+
     /// A real three-page PDF, so the viewer's pages and thumbnails have something to show.
     static func pdf(title: String) -> Data {
         let data = NSMutableData()
@@ -254,6 +279,9 @@ enum FixtureFiles {
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
             let text = NSAttributedString(string: "\(title), page \(page)", attributes: [.font: NSFont.systemFont(ofSize: 24)])
             text.draw(at: CGPoint(x: 72, y: 700))
+            // Invented reading text, so on-device briefs have something to read in fixture mode.
+            let body = NSAttributedString(string: reading[page - 1], attributes: [.font: NSFont.systemFont(ofSize: 10)])
+            body.draw(in: CGRect(x: 72, y: 72, width: 468, height: 610))
             NSGraphicsContext.restoreGraphicsState()
             context.endPDFPage()
         }

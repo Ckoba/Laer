@@ -9,7 +9,9 @@ final class LaerFlowUITests: XCTestCase {
 
     private func launch(_ extra: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-LaerUITestReset", "YES", "-LaerFixtureMode", "YES"] + extra
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES", "-LaerUITestReset", "YES", "-LaerFixtureMode", "YES",
+            // Launch-time values, so the person's own sidebar and page settings never reach the tests.
+            "-showsSidebar", "YES", "-viewerPagesLocked", "NO"] + extra
         app.launch()
         return app
     }
@@ -77,7 +79,7 @@ final class LaerFlowUITests: XCTestCase {
         let app = launch()
         XCTAssertTrue(sidebar(app, "course.12").waitForExistence(timeout: 15), "The active course did not show")
         XCTAssertTrue(rail(app, "home").exists)
-        XCTAssertTrue(element(app, containing: "Next 7 days").waitForExistence(timeout: 10), "Home did not show")
+        XCTAssertTrue(element(app, containing: "Today").waitForExistence(timeout: 10), "Home did not show")
         XCTAssertTrue(sidebar(app, "course.11").waitForExistence(timeout: 5), "The archive list did not open")
     }
 

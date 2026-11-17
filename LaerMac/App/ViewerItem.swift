@@ -7,6 +7,17 @@ struct ViewerItem: Identifiable, Hashable {
     var title: String
     /// Nil while the file is on its way, so the tab can open at once.
     var fileURL: URL?
+    /// A PDF page to show first, zero-based, such as a course's rows in an exam plan.
+    var startPage: Int?
+
+    /// A New tab page rather than a file.
+    var isNewTab: Bool { id.hasPrefix(Self.newTabPrefix) }
+
+    private static let newTabPrefix = "newtab:"
+
+    static func newTab() -> ViewerItem {
+        ViewerItem(id: newTabPrefix + UUID().uuidString, title: "New tab", fileURL: nil)
+    }
 
     var isPDF: Bool { fileURL?.pathExtension.lowercased() == "pdf" }
     var isSlides: Bool { ["ppt", "pptx", "key", "pps", "ppsx"].contains(fileURL?.pathExtension.lowercased() ?? "") }

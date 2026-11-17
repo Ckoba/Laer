@@ -11,6 +11,8 @@ final class Navigation {
     var expandedCourses: Set<Int> = []
     var isArchiveOpen = false
     var isPaletteOpen = false
+    /// A kind the palette starts filtered to, such as materials from the New tab's Resources. Read once.
+    var paletteKind: SearchKind?
 
     func tab(for courseId: Int) -> CourseTab { courseTabs[courseId] ?? .plans }
 

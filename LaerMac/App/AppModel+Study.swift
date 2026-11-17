@@ -57,6 +57,7 @@ extension AppModel {
     func open(_ resource: Resource) async {
         if let url = await savedFileURL(for: resource) {
             viewerItem = ViewerItem(id: resource.id, title: resource.title, fileURL: url)
+            noteRecent(resource)
             Perf.mark("saved file shown")
             return
         }
@@ -66,6 +67,7 @@ extension AppModel {
         await download(resource)
         if let url = await savedFileURL(for: resource) {
             viewerItem = ViewerItem(id: resource.id, title: resource.title, fileURL: url)
+            noteRecent(resource)
         } else if let tab = viewerTabs.first(where: { $0.id == resource.id && $0.fileURL == nil }) {
             // Not a file after all. The caller decides what to show instead.
             closeTab(tab)

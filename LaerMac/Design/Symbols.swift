@@ -26,6 +26,8 @@ enum Symbol {
     static let grades = "chart.bar"
     static let pin = "pin"
     static let lecture = "clock"
+    static let edit = "pencil"
+    static let exam = "graduationcap"
 
     // Things
     static let course = "book.closed"
@@ -40,4 +42,28 @@ enum Symbol {
     static let saved = "checkmark.circle"
     static let brief = "list.bullet.rectangle"
     static let appUpdate = "arrow.down.to.line.circle"
+    static let rotate = "rotate.right"
+    static let newTab = "plus"
+    static let resources = "folder"
+    static let announcements = "megaphone"
+
+    /// Icons a person can give their own links.
+    static let linkChoices = [
+        "globe", "envelope", "graduationcap", "key", "person.crop.circle", "calendar",
+        "doc.text", "book.closed", "building.columns", "video", "link",
+    ]
+
+    /// A first guess from a link's name and address; the person can pick another.
+    static func linkIcon(title: String, address: String) -> String {
+        let text = "\(title) \(address)".lowercased()
+        let rules: [([String], String)] = [
+            (["mail", "outlook", "gmail"], "envelope"),
+            (["exam", "eksam", "prøve"], "graduationcap"),
+            (["sso", "login", "sign in", "signin", "auth"], "key"),
+            (["calendar", "kalender", "skema", "schedule", "timetable"], "calendar"),
+            (["zoom", "teams", "meet"], "video"),
+            (["library", "bibliotek"], "book.closed"),
+        ]
+        return rules.first { $0.0.contains { text.contains($0) } }?.1 ?? "globe"
+    }
 }
