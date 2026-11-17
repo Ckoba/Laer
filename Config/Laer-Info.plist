@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Updates: the appcast is an asset of the latest public GitHub release. -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/ckoba/Laer/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>cK5xryWupSFf5xPcUkAJRYJ/TZ2n4vcEFGYcxvlCO0Q=</string>
+	<key>SUEnableInstallerLauncherService</key>
+	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>21600</integer>
+</dict>
+</plist>

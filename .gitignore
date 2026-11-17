@@ -1,0 +1,35 @@
+# Private source reports, kept local only
+Laer-macOS-implementation-plan.md
+deep-research-report*.md
+
+# Local signing and machine settings
+Config/Local.xcconfig
+
+# Agent and editor state; the shared .claude setup (hooks, skills, agents, settings.json) is tracked
+.claude/settings.local.json
+.claude/worktrees/
+*.xcuserstate
+xcuserdata/
+
+# macOS metadata, including AppleDouble files on non-APFS volumes
+.DS_Store
+._*
+
+# Build output
+.build/
+.swiftpm/
+DerivedData/
+/build/
+*.xcresult
+
+# Probe output can describe a real account, never commit it
+probe-report*.json
+
+# Machine-local devkit config: absolute paths and the personal terms location
+devkit.config.json
+
+# Windows build products
+**/bin/
+**/obj/
+/artifacts/
+.vs/

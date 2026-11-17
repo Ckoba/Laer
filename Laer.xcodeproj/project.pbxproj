@@ -1,0 +1,607 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B596F22402FE03D1BE496DE7 /* LaerCore in Frameworks */ = {isa = PBXBuildFile; productRef = E275BD78ADB7CA550B6F259D /* LaerCore */; };
+		A1C0DE5A1E0000000000F001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A1C0DE5A1E0000000000F003 /* Sparkle */; };
+		F1C56CFAC75702D2A3DD367D /* LaerQuickLookService.xpc in CopyFiles */ = {isa = PBXBuildFile; fileRef = 26FBB5F076122400EF8D5E19 /* LaerQuickLookService.xpc */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		242800D00498F034D7A890DC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BCE55EE845C770D2F4D10886 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D8740EB30B0749E3598F9E16;
+			remoteInfo = Laer;
+		};
+		5CF7EB1605CD17D4A16C5D33 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BCE55EE845C770D2F4D10886 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 20918E315303282AE4D0DD10;
+			remoteInfo = LaerQuickLookService;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		B4D8A75F46E23B2DBC30BAB1 /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/XPCServices";
+			dstSubfolderSpec = 16;
+			files = (
+				F1C56CFAC75702D2A3DD367D /* LaerQuickLookService.xpc in CopyFiles */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		17873333EE835274E8FB8E88 /* Laer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Laer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		26FBB5F076122400EF8D5E19 /* LaerQuickLookService.xpc */ = {isa = PBXFileReference; explicitFileType = "wrapper.xpc-service"; includeInIndex = 0; path = LaerQuickLookService.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
+		53968E51695221BB2B9A0485 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
+		5C9DB2796B00BC406EBA2A45 /* LaerCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = LaerCore; path = Packages/LaerCore; sourceTree = SOURCE_ROOT; };
+		68F0029CF220394908EF126F /* LaerMacUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LaerMacUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		7522D2268D75546740FE2612 /* LaerMacUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = LaerMacUITests;
+			sourceTree = "<group>";
+		};
+		BBF859305BC24D130DEACDD7 /* LaerMac */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = LaerMac;
+			sourceTree = "<group>";
+		};
+		FECDA7E6BB29AA2D5648BB70 /* LaerQuickLookService */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = LaerQuickLookService;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D68CE0D0376ED46E6C9F8800 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B596F22402FE03D1BE496DE7 /* LaerCore in Frameworks */,
+				A1C0DE5A1E0000000000F001 /* Sparkle in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		4C1F2CF4356BD3815A50CE63 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				17873333EE835274E8FB8E88 /* Laer.app */,
+				68F0029CF220394908EF126F /* LaerMacUITests.xctest */,
+				26FBB5F076122400EF8D5E19 /* LaerQuickLookService.xpc */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		6600E28F8AE725694DE6BFBA /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				53968E51695221BB2B9A0485 /* Base.xcconfig */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		CE2812A23287FE0E5A0432D5 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				5C9DB2796B00BC406EBA2A45 /* LaerCore */,
+			);
+			path = Packages;
+			sourceTree = "<group>";
+		};
+		D498588FE3D9B84B908F9806 = {
+			isa = PBXGroup;
+			children = (
+				6600E28F8AE725694DE6BFBA /* Config */,
+				BBF859305BC24D130DEACDD7 /* LaerMac */,
+				7522D2268D75546740FE2612 /* LaerMacUITests */,
+				FECDA7E6BB29AA2D5648BB70 /* LaerQuickLookService */,
+				CE2812A23287FE0E5A0432D5 /* Packages */,
+				4C1F2CF4356BD3815A50CE63 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		20918E315303282AE4D0DD10 /* LaerQuickLookService */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5BAC7E48A4A79C6474EE1CDB /* Build configuration list for PBXNativeTarget "LaerQuickLookService" */;
+			buildPhases = (
+				84C5D6D52B28BB2E892765AD /* Sources */,
+				C39F056154837646A37D26CB /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				FECDA7E6BB29AA2D5648BB70 /* LaerQuickLookService */,
+			);
+			name = LaerQuickLookService;
+			packageProductDependencies = (
+			);
+			productName = LaerQuickLookService;
+			productReference = 26FBB5F076122400EF8D5E19 /* LaerQuickLookService.xpc */;
+			productType = "com.apple.product-type.xpc-service";
+		};
+		554C2B4BF79D13C1238999D8 /* LaerMacUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A7C87A83581412A03E0F2100 /* Build configuration list for PBXNativeTarget "LaerMacUITests" */;
+			buildPhases = (
+				9B943CF63F6DB1BB0FD2DAD9 /* Sources */,
+				BE4B58C8FD4086FD3D6F3B6C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				698D41F58A4B991BDDEDC9BF /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				7522D2268D75546740FE2612 /* LaerMacUITests */,
+			);
+			name = LaerMacUITests;
+			packageProductDependencies = (
+			);
+			productName = LaerMacUITests;
+			productReference = 68F0029CF220394908EF126F /* LaerMacUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		D8740EB30B0749E3598F9E16 /* Laer */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A918750F4E5713B6CFC4F0FC /* Build configuration list for PBXNativeTarget "Laer" */;
+			buildPhases = (
+				300502D09911B4E70C82DFD4 /* Sources */,
+				2C2BC08ACC749EA6D2F54184 /* Resources */,
+				B4D8A75F46E23B2DBC30BAB1 /* CopyFiles */,
+				D68CE0D0376ED46E6C9F8800 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				41D6A5E6DB4957C47F18B5D3 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				BBF859305BC24D130DEACDD7 /* LaerMac */,
+			);
+			name = Laer;
+			packageProductDependencies = (
+				E275BD78ADB7CA550B6F259D /* LaerCore */,
+				A1C0DE5A1E0000000000F003 /* Sparkle */,
+			);
+			productName = Laer;
+			productReference = 17873333EE835274E8FB8E88 /* Laer.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		BCE55EE845C770D2F4D10886 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					20918E315303282AE4D0DD10 = {
+						ProvisioningStyle = Automatic;
+					};
+					554C2B4BF79D13C1238999D8 = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = D8740EB30B0749E3598F9E16;
+					};
+					D8740EB30B0749E3598F9E16 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 06A29C3EDDA2A2D6CA7B6C8D /* Build configuration list for PBXProject "Laer" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = D498588FE3D9B84B908F9806;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				B9DBCFBAA7E99ED1EAC35A03 /* XCLocalSwiftPackageReference "Packages/LaerCore" */,
+				A1C0DE5A1E0000000000F002 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 4C1F2CF4356BD3815A50CE63 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				D8740EB30B0749E3598F9E16 /* Laer */,
+				20918E315303282AE4D0DD10 /* LaerQuickLookService */,
+				554C2B4BF79D13C1238999D8 /* LaerMacUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		2C2BC08ACC749EA6D2F54184 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BE4B58C8FD4086FD3D6F3B6C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C39F056154837646A37D26CB /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		300502D09911B4E70C82DFD4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		84C5D6D52B28BB2E892765AD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		9B943CF63F6DB1BB0FD2DAD9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		41D6A5E6DB4957C47F18B5D3 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 20918E315303282AE4D0DD10 /* LaerQuickLookService */;
+			targetProxy = 5CF7EB1605CD17D4A16C5D33 /* PBXContainerItemProxy */;
+		};
+		698D41F58A4B991BDDEDC9BF /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D8740EB30B0749E3598F9E16 /* Laer */;
+			targetProxy = 242800D00498F034D7A890DC /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1767EEEC6201AE1B57C7E089 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 53968E51695221BB2B9A0485 /* Base.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		3F95C4D6D28CCCF1278FB130 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = LaerQuickLookService;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				INFOPLIST_FILE = "Config/QuickLookService-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = app.laer.Laer.QuickLookService;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		5ADC6B845556DAA524AA44C2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = LaerMac/App/Laer.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/Laer-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Laer;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		75CCD13211D1C9AB9B297D29 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = LaerMac/App/Laer.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Config/Laer-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Laer;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		8BA08ABAE50EF078EACFF16F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.laer.LaerUITests;
+				SDKROOT = macosx;
+				TEST_TARGET_NAME = Laer;
+			};
+			name = Debug;
+		};
+		9A6429A27D5079CA846F04D4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.laer.LaerUITests;
+				SDKROOT = macosx;
+				TEST_TARGET_NAME = Laer;
+			};
+			name = Release;
+		};
+		E0AFF8F08BBCB664C50858C9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 53968E51695221BB2B9A0485 /* Base.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		FF4D4632B539050247009E74 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = LaerQuickLookService;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				INFOPLIST_FILE = "Config/QuickLookService-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = app.laer.Laer.QuickLookService;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		06A29C3EDDA2A2D6CA7B6C8D /* Build configuration list for PBXProject "Laer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1767EEEC6201AE1B57C7E089 /* Debug */,
+				E0AFF8F08BBCB664C50858C9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		5BAC7E48A4A79C6474EE1CDB /* Build configuration list for PBXNativeTarget "LaerQuickLookService" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FF4D4632B539050247009E74 /* Debug */,
+				3F95C4D6D28CCCF1278FB130 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A7C87A83581412A03E0F2100 /* Build configuration list for PBXNativeTarget "LaerMacUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8BA08ABAE50EF078EACFF16F /* Debug */,
+				9A6429A27D5079CA846F04D4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A918750F4E5713B6CFC4F0FC /* Build configuration list for PBXNativeTarget "Laer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5ADC6B845556DAA524AA44C2 /* Debug */,
+				75CCD13211D1C9AB9B297D29 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		B9DBCFBAA7E99ED1EAC35A03 /* XCLocalSwiftPackageReference "Packages/LaerCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/LaerCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A1C0DE5A1E0000000000F002 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.6.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		E275BD78ADB7CA550B6F259D /* LaerCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LaerCore;
+		};
+		A1C0DE5A1E0000000000F003 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1C0DE5A1E0000000000F002 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = BCE55EE845C770D2F4D10886 /* Project object */;
+}
