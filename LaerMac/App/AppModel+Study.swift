@@ -215,7 +215,7 @@ extension AppModel {
     }
 
     func rebuildSearchIndex() async {
-        guard let store = snapshots, !isIndexing else { return }
+        guard let store = snapshots, !isIndexing, !searchOCRIsClearing else { return }
         searchDocumentWorker?.cancel()
         searchOCRBatch?.cancel()
         searchDocumentWorker = nil
@@ -500,7 +500,7 @@ extension AppModel {
     static let searchOCRPreference = "LaerSearchOCR"
 
     private var canRunSearchOCR: Bool {
-        !searchOCRPowerPaused && UserDefaults.standard.bool(forKey: Self.searchOCRPreference)
+        !searchOCRIsClearing && !searchOCRPowerPaused && UserDefaults.standard.bool(forKey: Self.searchOCRPreference)
     }
 
     func updateSearchOCR() {
@@ -514,12 +514,34 @@ extension AppModel {
         }
     }
 
+    func removeRecognizedSearchText() async {
+        guard let index = searchIndex, !searchOCRIsClearing else { return }
+        searchOCRIsClearing = true
+        UserDefaults.standard.set(false, forKey: Self.searchOCRPreference)
+        searchOCRBatch?.cancel()
+        let worker = searchDocumentWorker
+        worker?.cancel()
+        await worker?.value
+        guard index === searchIndex else { return }
+        do {
+            try await index.removeRecognizedText()
+            if index === searchIndex { searchRevision += 1 }
+        } catch {
+            if index === searchIndex { searchIndexFailed = true }
+        }
+        guard index === searchIndex else { return }
+        searchOCRIsClearing = false
+        for asset in savedAssets.values { queueDocumentSearch(asset, resource: nil) }
+    }
+
     func queueDocumentSearch(_ asset: LocalAsset, resource: Resource?) {
         let format = (asset.relativePath as NSString).pathExtension.lowercased()
         let supportsOCR = canRunSearchOCR && DocumentOCR.formats.contains(format)
         guard DocumentSearchText.formats.contains(format) || supportsOCR,
               let index = searchIndex, let downloads else { return }
-        searchDocumentQueue[asset.id] = SearchDocumentWork(asset: asset, resource: resource)
+        let queued = searchDocumentQueue[asset.id]
+        let queuedResource = queued?.asset == asset ? queued?.resource : nil
+        searchDocumentQueue[asset.id] = SearchDocumentWork(asset: asset, resource: resource ?? queuedResource)
         guard searchDocumentWorker == nil else { return }
         searchDocumentWorker = Task(priority: .utility) {
             defer {

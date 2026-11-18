@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import Testing
 @testable import LaerCore
 
@@ -138,11 +139,40 @@ import Testing
         #expect(hits.first?.document?.recognizedText == true)
         #expect(try await reopened.search("embedded textbook", scope: .everywhere, activeCourseIds: []).first?.document?.page == 0)
 
+        try await reopened.removeRecognizedText()
+        #expect(try await reopened.nextOCRPage(resourceKey: asset.id, version: asset.relativePath) == 0)
+        #expect(try await reopened.search("field observations", scope: .everywhere, activeCourseIds: []).isEmpty)
+        #expect(try await reopened.search("embedded textbook", scope: .everywhere, activeCourseIds: []).first?.document?.page == 0)
+        try await reopened.appendOCRBatch(first, asset: asset, resource: nil)
+
         let original = asset
         asset.relativePath = "v2.pdf"
         try await reopened.replaceDocument(asset: asset, resource: nil, pages: [])
         try await reopened.appendOCRBatch(first, asset: original, resource: nil)
         #expect(try await reopened.nextOCRPage(resourceKey: asset.id, version: asset.relativePath) == 0)
         #expect(try await reopened.search("field observations", scope: .everywhere, activeCourseIds: []).isEmpty)
+    }
+
+    @Test func addingOCRToTheExistingSchemaPreservesIndexedText() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("search.sqlite")
+        let current = try SearchDatabase(url: url)
+        try await current.update(group: "courses", hits: [SearchHit(id: "old", kind: .course, title: "Archived reading")], complete: true)
+        try await current.close()
+
+        // Version 3 had the same search tables and ranking index, without the OCR table.
+        do {
+            var database: OpaquePointer?
+            let opened = sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READWRITE, nil)
+            defer { sqlite3_close(database) }
+            try #require(opened == SQLITE_OK)
+            let restoredV3 = sqlite3_exec(database, "DROP TABLE search_ocr; PRAGMA user_version = 3;", nil, nil, nil)
+            try #require(restoredV3 == SQLITE_OK)
+        }
+
+        let migrated = try SearchDatabase(url: url)
+        #expect(try await migrated.search("archived reading", scope: .everywhere, activeCourseIds: []).map(\.id) == ["old"])
+        #expect(try await migrated.nextOCRPage(resourceKey: "file", version: "original.pdf") == 0)
     }
 }

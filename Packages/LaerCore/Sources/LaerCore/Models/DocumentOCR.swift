@@ -138,7 +138,9 @@ public enum DocumentOCR {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         let supported = (try? request.supportedRecognitionLanguages()) ?? []
-        let languages = ["da-DK", "en-US"].filter(supported.contains)
+        let languages = ["da-DK", "en-US"].compactMap { preferred in
+            supported.contains(preferred) ? preferred : supported.first { $0.split(separator: "-").first == preferred.prefix(2) }
+        }
         if !languages.isEmpty { request.recognitionLanguages = languages }
         request.usesLanguageCorrection = true
         try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])

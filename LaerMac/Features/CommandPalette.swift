@@ -17,6 +17,7 @@ struct CommandPalette: View {
     @State private var onlineSummary: OnlineSearchSummary?
     @State private var expandedDocuments: Set<String> = []
     @State private var showsPreview = false
+    @State private var confirmsOCRRemoval = false
     @State private var searchingOnline = false
     @State private var hasSearched = false
     @State private var contentHeight: CGFloat = 0
@@ -160,6 +161,17 @@ struct CommandPalette: View {
         .onChange(of: kind) { if kind != .material { fileType = nil } }
         .onChange(of: indexArchived) { Task { await model.changeSearchCoverage() } }
         .onChange(of: recognizesScans) { model.updateSearchOCR() }
+        .confirmationDialog("Remove recognized text?", isPresented: $confirmsOCRRemoval) {
+            Button("Remove recognized text", role: .destructive) {
+                recognizesScans = false
+                localHits.removeAll { $0.document?.recognizedText == true }
+                navigation.searchReturn = nil
+                if navigation.searchTarget?.document?.recognizedText == true { navigation.searchTarget = nil }
+                Task { await model.removeRecognizedSearchText() }
+            }
+        } message: {
+            Text("This pauses text recognition and clears its search results and progress. Your saved files and embedded PDF text stay available.")
+        }
         .onChange(of: query) {
             keepsRestoredOnline = false
             localHits = []
@@ -258,8 +270,11 @@ struct CommandPalette: View {
                 Toggle("Search itslearning online", isOn: $onlineEnabled)
                 Toggle("Index archived courses", isOn: $indexArchived)
                 Toggle("Recognize text in scans and images", isOn: $recognizesScans)
+                    .disabled(model.searchOCRIsClearing)
+                Button("Remove recognized text…") { confirmsOCRRemoval = true }
+                    .disabled(model.searchOCRIsClearing)
                 Button("Rebuild local search index") { Task { await model.rebuildSearchIndex() } }
-                    .disabled(model.isIndexing)
+                    .disabled(model.isIndexing || model.searchOCRIsClearing)
             }
             .controlSize(.small)
         }

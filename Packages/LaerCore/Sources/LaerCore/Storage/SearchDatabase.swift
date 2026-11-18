@@ -86,6 +86,13 @@ public actor SearchDatabase {
         }
     }
 
+    public func removeRecognizedText() throws {
+        try db.transaction {
+            try db.run("DELETE FROM search_records WHERE collection IN (SELECT collection FROM search_ocr)", [])
+            try db.run("DELETE FROM search_ocr", [])
+        }
+    }
+
     /// A complete, authenticated course listing can invalidate entries for a formerly visible course.
     public func retainCourses(_ courseIds: Set<Int>) throws {
         let encoded = String(decoding: try JSONEncoder().encode(courseIds), as: UTF8.self)

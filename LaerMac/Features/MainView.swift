@@ -54,7 +54,7 @@ struct MainView: View {
             navigation.restoresSearch = false
             navigation.isPaletteOpen = false
         }
-        .onReceive(NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange).receive(on: RunLoop.main)) { _ in
             model.updateSearchOCR()
         }
         .focusedSceneValue(\.openPalette, PaletteAction { navigation.isPaletteOpen = true })

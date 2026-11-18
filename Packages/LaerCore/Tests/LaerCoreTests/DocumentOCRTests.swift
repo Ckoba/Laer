@@ -40,11 +40,13 @@ import UniformTypeIdentifiers
         #expect(batch.pages.first?.text.lowercased().contains("field observations") == true)
     }
 
-    @Test func visionRecognizesSavedPNGWithoutAPageNumber() throws {
+    @Test(arguments: ["png", "jpg"])
+    func visionRecognizesSavedImageWithoutAPageNumber(_ fileExtension: String) throws {
         let root = try makeWorkspace()
         defer { try? FileManager.default.removeItem(at: root) }
-        let file = root.appendingPathComponent("scan.png")
-        let output = try #require(CGImageDestinationCreateWithURL(file as CFURL, UTType.png.identifier as CFString, 1, nil))
+        let file = root.appendingPathComponent("scan.\(fileExtension)")
+        let type = fileExtension == "png" ? UTType.png : UTType.jpeg
+        let output = try #require(CGImageDestinationCreateWithURL(file as CFURL, type.identifier as CFString, 1, nil))
         CGImageDestinationAddImage(output, try makeBitmap(box: CGRect(x: 0, y: 0, width: 800, height: 600)), nil)
         try #require(CGImageDestinationFinalize(output))
 
@@ -58,6 +60,20 @@ import UniformTypeIdentifiers
         let worker = Task.detached {
             withUnsafeCurrentTask { $0?.cancel() }
             return try DocumentOCR.readPDF(from: URL(fileURLWithPath: "/unused.pdf"), startPage: 0)
+        }
+        await #expect(throws: CancellationError.self) { try await worker.value }
+    }
+
+    @Test func cancellationDuringRecognitionDiscardsTheUncommittedBatch() async throws {
+        let root = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("scan.pdf")
+        try writePDF(file, imagePages: [true, true])
+        let worker = Task.detached {
+            try DocumentOCR.readPDF(from: file, startPage: 0) { _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+                return "Partial OCR"
+            }
         }
         await #expect(throws: CancellationError.self) { try await worker.value }
     }

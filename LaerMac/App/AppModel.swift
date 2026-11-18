@@ -96,6 +96,7 @@ final class AppModel {
     @ObservationIgnored var searchDocumentQueue: [String: SearchDocumentWork] = [:]
     @ObservationIgnored var searchOCRBatch: Task<DocumentOCRBatch, Error>?
     var searchOCRIsRunning = false
+    var searchOCRIsClearing = false
     var searchOCRPowerPaused = ProcessInfo.processInfo.isLowPowerModeEnabled
     var searchIndexedAt: Date?
     var isIndexing = false
@@ -537,6 +538,7 @@ final class AppModel {
         searchDocumentQueue = [:]
         searchOCRBatch = nil
         searchOCRIsRunning = false
+        searchOCRIsClearing = false
         snapshots = nil
         downloads = nil
         briefs.close()
