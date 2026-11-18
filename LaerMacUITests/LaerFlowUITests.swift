@@ -308,8 +308,9 @@ final class LaerFlowUITests: XCTestCase {
         let result = app.descendants(matching: .any)["search.result.plan-11-601"].firstMatch
         open(result, "A plan found by its description")
         XCTAssertTrue(app.buttons["search.plan.back"].firstMatch.waitForExistence(timeout: 10), "Search did not open a single plan")
-        XCTAssertTrue(app.buttons["plan.row.601"].firstMatch.exists, "Search did not open plan 601")
-        XCTAssertTrue(element(app, containing: "Syllabus.pdf").exists, "The exact plan is expanded to its materials")
+        XCTAssertTrue(app.descendants(matching: .any)["search.plan.601"].firstMatch.exists, "Search did not open plan 601")
+        XCTAssertTrue(app.descendants(matching: .any)["plan.resource.702"].firstMatch.waitForExistence(timeout: 10),
+                      "The exact plan should show its materials")
     }
 
     func testOnlineResultsAppendWithoutReplacingTheSelectedLocalHit() {
@@ -326,6 +327,7 @@ final class LaerFlowUITests: XCTestCase {
         XCTAssertTrue(local.firstMatch.waitForExistence(timeout: 10))
         XCTAssertTrue(online.waitForExistence(timeout: 10))
         XCTAssertEqual(local.count, 1, "The online match for a local file is joined by stable ID")
+        keepScreenshot(app, name: "Local and online search results")
         field.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(app.buttons["Close Syllabus.pdf"].firstMatch.waitForExistence(timeout: 10))
     }
@@ -342,13 +344,23 @@ final class LaerFlowUITests: XCTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.typeText("silted up")
         let result = app.descendants(matching: .any)["search.result.document-LearningToolElement-702-1"].firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 15))
+        keepScreenshot(app, name: "PDF text search")
         open(result, "Text from page two of the saved PDF")
-        let page = app.staticTexts["viewer.pdf.page"].firstMatch
-        XCTAssertTrue(waitUntil(timeout: 15) { page.exists && page.label == "Page 2 of 3" },
-                      page.exists ? "The PDF reader shows \(page.label)" : "The PDF reader has no page indicator")
+        let page = element(app, containing: "Page 2 of 3")
+        let indicator = app.staticTexts["viewer.pdf.page"].firstMatch
+        XCTAssertTrue(page.waitForExistence(timeout: 15), "The PDF reader indicator: \(indicator.debugDescription)")
+        keepScreenshot(app, name: "PDF page opened from search")
         open(app.buttons["search.return"].firstMatch, "Back to the results")
         XCTAssertEqual(app.textFields["Search"].firstMatch.value as? String, "silted up")
         XCTAssertTrue(result.exists)
+    }
+
+    private func keepScreenshot(_ app: XCUIApplication, name: String) {
+        let attachment = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     func testWeekCalendarMovesByWeek() throws {

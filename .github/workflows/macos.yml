@@ -37,18 +37,41 @@ jobs:
         with:
           persist-credentials: false
       - run: xcodebuild -version
-      - name: Build and run UI tests
+      - name: Build app and UI tests
         run: |
           xcodebuild -project Laer.xcodeproj -scheme Laer \
             -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/LaerBuild" \
             -only-testing:LaerMacUITests \
+            build-for-testing
+      - name: Run search UI tests
+        run: |
+          xcodebuild -project Laer.xcodeproj -scheme Laer \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/LaerBuild" \
+            -only-testing:LaerMacUITests/LaerFlowUITests/testOnlineResultsAppendWithoutReplacingTheSelectedLocalHit \
+            -only-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensTheIndexedPlan \
+            -only-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensThePageFoundInsideASavedPDF \
             -parallel-testing-enabled NO \
-            -resultBundlePath "$RUNNER_TEMP/LaerUITests.xcresult" test
+            -resultBundlePath "$RUNNER_TEMP/LaerSearchUITests.xcresult" test-without-building
+      - name: Run existing UI tests
+        run: |
+          xcodebuild -project Laer.xcodeproj -scheme Laer \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/LaerBuild" \
+            -only-testing:LaerMacUITests \
+            -skip-testing:LaerMacUITests/LaerFlowUITests/testOnlineResultsAppendWithoutReplacingTheSelectedLocalHit \
+            -skip-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensTheIndexedPlan \
+            -skip-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensThePageFoundInsideASavedPDF \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$RUNNER_TEMP/LaerUITests.xcresult" test-without-building
       - name: Upload UI test results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: LaerUITests-xcresult
-          path: ${{ runner.temp }}/LaerUITests.xcresult
+          path: |
+            ${{ runner.temp }}/LaerSearchUITests.xcresult
+            ${{ runner.temp }}/LaerUITests.xcresult
           if-no-files-found: ignore
           retention-days: 7

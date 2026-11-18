@@ -302,8 +302,10 @@ struct PlansView: View {
                     .padding(.bottom, Space.s8)
                     .accessibilityIdentifier("search.plan.back")
                 if let plan = items.first(where: { $0.planId == planId }) {
-                    PlanRow(plan: plan, courseId: courseId, note: model.lectureNote(for: plan, course: course), isExpanded: true)
-                        .id(planId)
+                    PageHeader(title: plan.name ?? "Untitled plan")
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("search.plan.\(planId)")
+                    PlanContents(plan: plan, courseId: courseId, note: model.lectureNote(for: plan, course: course))
                 } else {
                     EmptyState(state: state, empty: "This plan is unavailable")
                 }
@@ -537,7 +539,7 @@ private struct PlanRow: View {
     let note: LectureNote?
     /// 13pt in a flat list; plans under a topic use the larger 15pt regular.
     var titleFont: Font = Type.t13
-    @State var isExpanded = false
+    @State private var isExpanded = false
 
     var body: some View {
         let range = plan.rangeText
@@ -567,24 +569,8 @@ private struct PlanRow: View {
             .accessibilityIdentifier("plan.row.\(plan.planId)")
             .accessibilityAddTraits(isExpanded ? .isSelected : [])
             if isExpanded {
-                VStack(alignment: .leading, spacing: Space.s2) {
-                    if let text = plan.planDescription, !text.isEmpty {
-                        RichTextView(html: text)
-                            .padding(.horizontal, Space.s8)
-                            .padding(.bottom, Space.s4)
-                    }
-                    if let note, note.brief != nil || note.status == .noTeaching {
-                        BriefBlock(note: note)
-                            .padding(.horizontal, Space.s8)
-                            .padding(.bottom, Space.s4)
-                    }
-                    ForEach(plan.elements ?? []) { element in
-                        PlanElementRow(element: element, courseId: courseId)
-                    }
-                }
-                .undividedRows()
-                .padding(.leading, Space.s16)
-                .padding(.bottom, Space.s8)
+                PlanContents(plan: plan, courseId: courseId, note: note)
+                    .padding(.leading, Space.s16)
                 RowDivider()
             }
         }
@@ -612,6 +598,33 @@ private struct PlanRow: View {
         }
         .font(Type.t11)
         .foregroundStyle(Color.textMuted)
+    }
+}
+
+private struct PlanContents: View {
+    let plan: PlanPreview
+    let courseId: Int
+    let note: LectureNote?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s2) {
+            if let text = plan.planDescription, !text.isEmpty {
+                RichTextView(html: text)
+                    .padding(.horizontal, Space.s8)
+                    .padding(.bottom, Space.s4)
+            }
+            if let note, note.brief != nil || note.status == .noTeaching {
+                BriefBlock(note: note)
+                    .padding(.horizontal, Space.s8)
+                    .padding(.bottom, Space.s4)
+            }
+            ForEach(plan.elements ?? []) { element in
+                PlanElementRow(element: element, courseId: courseId)
+                    .accessibilityIdentifier("plan.resource.\(element.id)")
+            }
+        }
+        .undividedRows()
+        .padding(.bottom, Space.s8)
     }
 }
 

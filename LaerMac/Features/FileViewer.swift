@@ -677,6 +677,7 @@ private struct PDFPanel: View {
                     .padding(Space.s12)
                     .allowsHitTesting(false)
                     .accessibilityIdentifier("viewer.pdf.page")
+                    .accessibilityLabel("Page \(controller.pageIndex + 1) of \(controller.pageCount)")
             }
         }
         .background(Color.chrome)
