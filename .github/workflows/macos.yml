@@ -19,7 +19,10 @@ jobs:
         with:
           persist-credentials: false
       - run: xcodebuild -version
-      - run: swift test --package-path Packages/LaerCore
+      - name: Run core tests
+        run: swift test --package-path Packages/LaerCore --skip DocumentOCRTests
+      - name: Run native PDF and image recognition tests
+        run: swift test --package-path Packages/LaerCore --filter DocumentOCRTests --no-parallel
       - name: Measure local search on synthetic data
         env:
           LAER_SEARCH_BENCHMARK: "1"

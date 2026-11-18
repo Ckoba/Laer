@@ -7,7 +7,7 @@ import Testing
 import UniformTypeIdentifiers
 @testable import LaerCore
 
-@Suite struct DocumentOCRTests {
+@Suite(.serialized) struct DocumentOCRTests {
     @Test func skipsEmbeddedTextAndResumesAfterTheLastScannedPage() throws {
         let root = try makeWorkspace()
         defer { try? FileManager.default.removeItem(at: root) }
