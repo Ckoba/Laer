@@ -499,9 +499,14 @@ extension AppModel {
 
     static let searchOCRPreference = "LaerSearchOCR"
 
+    private var canRunSearchOCR: Bool {
+        !searchOCRPowerPaused && UserDefaults.standard.bool(forKey: Self.searchOCRPreference)
+    }
+
     func updateSearchOCR() {
-        if UserDefaults.standard.bool(forKey: Self.searchOCRPreference) {
-            for asset in savedAssets.values where (asset.relativePath as NSString).pathExtension.lowercased() == "pdf" {
+        searchOCRPowerPaused = ProcessInfo.processInfo.isLowPowerModeEnabled
+        if canRunSearchOCR {
+            for asset in savedAssets.values where DocumentOCR.formats.contains((asset.relativePath as NSString).pathExtension.lowercased()) {
                 queueDocumentSearch(asset, resource: nil)
             }
         } else {
@@ -511,7 +516,9 @@ extension AppModel {
 
     func queueDocumentSearch(_ asset: LocalAsset, resource: Resource?) {
         let format = (asset.relativePath as NSString).pathExtension.lowercased()
-        guard DocumentSearchText.formats.contains(format), let index = searchIndex, let downloads else { return }
+        let supportsOCR = canRunSearchOCR && DocumentOCR.formats.contains(format)
+        guard DocumentSearchText.formats.contains(format) || supportsOCR,
+              let index = searchIndex, let downloads else { return }
         searchDocumentQueue[asset.id] = SearchDocumentWork(asset: asset, resource: resource)
         guard searchDocumentWorker == nil else { return }
         searchDocumentWorker = Task(priority: .utility) {
@@ -558,7 +565,7 @@ extension AppModel {
             try await index.replaceDocument(asset: asset, resource: work.resource, pages: pages)
             if index === searchIndex { searchRevision += 1 }
         }
-        guard url.pathExtension.lowercased() == "pdf", UserDefaults.standard.bool(forKey: Self.searchOCRPreference),
+        guard DocumentOCR.formats.contains(url.pathExtension.lowercased()), canRunSearchOCR,
               let next = try await index.nextOCRPage(resourceKey: asset.id, version: asset.relativePath),
               isCurrentSearchDocument(work, index: index, downloads: downloads) else { return }
         try await indexScannedPages(work, url: url, startingAt: next, index: index, downloads: downloads)
@@ -567,8 +574,8 @@ extension AppModel {
     private func indexScannedPages(
         _ work: SearchDocumentWork, url: URL, startingAt page: Int, index: SearchDatabase, downloads: DownloadStore
     ) async throws {
-        guard UserDefaults.standard.bool(forKey: Self.searchOCRPreference) else { return }
-        let extraction = Task.detached(priority: .utility) { try DocumentOCR.readPDF(from: url, startPage: page) }
+        guard canRunSearchOCR else { return }
+        let extraction = Task.detached(priority: .utility) { try DocumentOCR.read(from: url, startPage: page) }
         searchOCRBatch = extraction
         searchOCRIsRunning = true
         defer {
@@ -582,8 +589,7 @@ extension AppModel {
         } onCancel: {
             extraction.cancel()
         }
-        guard UserDefaults.standard.bool(forKey: Self.searchOCRPreference),
-              isCurrentSearchDocument(work, index: index, downloads: downloads) else { return }
+        guard canRunSearchOCR, isCurrentSearchDocument(work, index: index, downloads: downloads) else { return }
         try await index.appendOCRBatch(batch, asset: work.asset, resource: work.resource)
         guard isCurrentSearchDocument(work, index: index, downloads: downloads) else { return }
         if !batch.pages.isEmpty { searchRevision += 1 }
@@ -591,7 +597,7 @@ extension AppModel {
             // Yield between batches. Metadata searches and other saved documents get time on the executor.
             try await Task.sleep(for: .milliseconds(250))
             if isCurrentSearchDocument(work, index: index, downloads: downloads),
-               UserDefaults.standard.bool(forKey: Self.searchOCRPreference), searchDocumentQueue[work.asset.id] == nil {
+               canRunSearchOCR, searchDocumentQueue[work.asset.id] == nil {
                 searchDocumentQueue[work.asset.id] = work
             }
         }

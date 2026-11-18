@@ -1,6 +1,8 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import PDFKit
+import UniformTypeIdentifiers
 import Vision
 
 public struct DocumentOCRBatch: Sendable {
@@ -15,11 +17,29 @@ public struct DocumentOCRBatch: Sendable {
     }
 }
 
-/// Apple Vision fallback for saved PDF pages with little or no embedded text.
+/// Apple Vision fallback for saved images and PDF pages with little or no embedded text.
 public enum DocumentOCR {
+    public static let formats: Set<String> = ["pdf", "png", "jpg", "jpeg"]
     private static let maxRasterDimension: CGFloat = 1_536
     private static let maxPagesPerBatch = 16
     private static let maxScansPerBatch = 2
+    private static let maxRecognizedCharacters = 8_000
+    private static let maxSourcePixels = 64_000_000.0
+
+    public static func read(from url: URL, startPage: Int) throws -> DocumentOCRBatch {
+        if url.pathExtension.lowercased() == "pdf" {
+            return try readPDF(from: url, startPage: startPage)
+        }
+        try Task.checkCancellation()
+        let finished = DocumentOCRBatch(startPage: startPage, pages: [], nextPage: nil)
+        guard startPage == 0, formats.contains(url.pathExtension.lowercased()), isReadableFile(url),
+              let raster = rasterizeImage(url) else { return finished }
+        let recognized = try? recognizeText(raster)
+        try Task.checkCancellation()
+        guard let text = recognized?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return finished }
+        let page = DocumentSearchPage(index: nil, text: String(text.prefix(maxRecognizedCharacters)))
+        return DocumentOCRBatch(startPage: 0, pages: [page], nextPage: nil)
+    }
 
     /// Runs on a utility executor. A batch owns at most one rendered page at a time.
     public static func readPDF(from url: URL, startPage: Int) throws -> DocumentOCRBatch {
@@ -32,9 +52,7 @@ public enum DocumentOCR {
         try Task.checkCancellation()
         let start = max(0, startPage)
         let finished = DocumentOCRBatch(startPage: start, pages: [], nextPage: nil)
-        guard url.pathExtension.lowercased() == "pdf",
-              let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
-              values.isRegularFile == true, let bytes = values.fileSize, bytes <= DocumentSearchText.maxFileSize,
+        guard url.pathExtension.lowercased() == "pdf", isReadableFile(url),
               let document = PDFDocument(url: url), !document.isLocked else { return finished }
 
         let end = min(document.pageCount, DocumentSearchText.maxPDFPages)
@@ -53,8 +71,7 @@ public enum DocumentOCR {
                 do {
                     let text = try recognize(raster).trimmingCharacters(in: .whitespacesAndNewlines)
                     if !text.isEmpty {
-                        // At most 400 pages, keeping derived text bounded even across resumptions.
-                        pages.append(DocumentSearchPage(index: index, text: String(text.prefix(1_000))))
+                        pages.append(DocumentSearchPage(index: index, text: String(text.prefix(maxRecognizedCharacters))))
                     }
                 } catch is CancellationError {
                     throw CancellationError()
@@ -72,6 +89,29 @@ public enum DocumentOCR {
         guard let text else { return true }
         // Page numbers and short running headers do not count as a usable text layer.
         return text.lazy.filter(\.isLetter).prefix(24).count < 24
+    }
+
+    private static func isReadableFile(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+              values.isRegularFile == true, let bytes = values.fileSize else { return false }
+        return bytes <= DocumentSearchText.maxFileSize
+    }
+
+    private static func rasterizeImage(_ url: URL) -> CGImage? {
+        let metadataOnly = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, metadataOnly),
+              let type = CGImageSourceGetType(source) as String?,
+              type == UTType.png.identifier || type == UTType.jpeg.identifier,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, metadataOnly) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+              width > 0, height > 0, width * height <= maxSourcePixels else { return nil }
+        let options = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxRasterDimension),
+        ] as CFDictionary
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options)
     }
 
     private static func rasterize(_ page: CGPDFPage) -> CGImage? {

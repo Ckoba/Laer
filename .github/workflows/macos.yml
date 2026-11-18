@@ -52,6 +52,7 @@ jobs:
             -only-testing:LaerMacUITests/LaerFlowUITests/testOnlineResultsAppendWithoutReplacingTheSelectedLocalHit \
             -only-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensTheIndexedPlan \
             -only-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensThePageFoundInsideASavedPDF \
+            -only-testing:LaerMacUITests/LaerFlowUITests/testPaletteFindsOCRTextAndOpensTheScannedPage \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/LaerSearchUITests.xcresult" test-without-building
       - name: Run existing UI tests
@@ -63,6 +64,7 @@ jobs:
             -skip-testing:LaerMacUITests/LaerFlowUITests/testOnlineResultsAppendWithoutReplacingTheSelectedLocalHit \
             -skip-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensTheIndexedPlan \
             -skip-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensThePageFoundInsideASavedPDF \
+            -skip-testing:LaerMacUITests/LaerFlowUITests/testPaletteFindsOCRTextAndOpensTheScannedPage \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/LaerUITests.xcresult" test-without-building
       - name: Upload UI test results

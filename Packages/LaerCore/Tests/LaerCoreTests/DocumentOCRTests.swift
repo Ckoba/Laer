@@ -1,8 +1,10 @@
 import CoreGraphics
 import CoreText
 import Foundation
+import ImageIO
 import PDFKit
 import Testing
+import UniformTypeIdentifiers
 @testable import LaerCore
 
 @Suite struct DocumentOCRTests {
@@ -38,6 +40,20 @@ import Testing
         #expect(batch.pages.first?.text.lowercased().contains("field observations") == true)
     }
 
+    @Test func visionRecognizesSavedPNGWithoutAPageNumber() throws {
+        let root = try makeWorkspace()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("scan.png")
+        let output = try #require(CGImageDestinationCreateWithURL(file as CFURL, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(output, try makeBitmap(box: CGRect(x: 0, y: 0, width: 800, height: 600)), nil)
+        try #require(CGImageDestinationFinalize(output))
+
+        let batch = try DocumentOCR.read(from: file, startPage: 0)
+        let result = try #require(batch.pages.first)
+        #expect(result.index == nil)
+        #expect(result.text.lowercased().contains("field observations"))
+    }
+
     @Test func cancellationStopsBeforeRendering() async throws {
         let worker = Task.detached {
             withUnsafeCurrentTask { $0?.cancel() }
@@ -56,12 +72,7 @@ import Testing
         var box = CGRect(x: 0, y: 0, width: 800, height: 600)
         let consumer = try #require(CGDataConsumer(url: url as CFURL))
         let pdf = try #require(CGContext(consumer: consumer, mediaBox: &box, nil))
-        let bitmap = try #require(CGContext(data: nil, width: 1_600, height: 1_200, bitsPerComponent: 8,
-                                           bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(),
-                                           bitmapInfo: CGImageAlphaInfo.none.rawValue))
-        bitmap.scaleBy(x: 2, y: 2)
-        draw(in: bitmap, box: box)
-        let image = try #require(bitmap.makeImage())
+        let image = try makeBitmap(box: box)
         for rendered in imagePages {
             pdf.beginPDFPage(nil)
             if rendered { pdf.draw(image, in: box) }
@@ -69,6 +80,15 @@ import Testing
             pdf.endPDFPage()
         }
         pdf.closePDF()
+    }
+
+    private func makeBitmap(box: CGRect) throws -> CGImage {
+        let bitmap = try #require(CGContext(data: nil, width: 1_600, height: 1_200, bitsPerComponent: 8,
+                                           bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(),
+                                           bitmapInfo: CGImageAlphaInfo.none.rawValue))
+        bitmap.scaleBy(x: 2, y: 2)
+        draw(in: bitmap, box: box)
+        return try #require(bitmap.makeImage())
     }
 
     private func draw(in context: CGContext, box: CGRect) {

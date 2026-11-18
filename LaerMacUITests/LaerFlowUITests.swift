@@ -363,6 +363,25 @@ final class LaerFlowUITests: XCTestCase {
         add(attachment)
     }
 
+    func testPaletteFindsOCRTextAndOpensTheScannedPage() {
+        let app = launch(["-LaerSearchOCR", "YES", "-LaerFixtureScannedPDF", "YES", "-viewerPagesLocked", "NO"])
+        openCourseOne(app)
+        open(tab(app, "Files"), "The Files tab")
+        open(element(app, containing: "Syllabus.pdf"), "The scanned PDF to save")
+        let close = app.buttons.matching(NSPredicate(format: "label == 'Close file' AND identifier != '_XCUI:CloseWindow'")).firstMatch
+        open(close, "The open PDF")
+        app.typeKey("k", modifierFlags: .command)
+        let field = app.textFields["Search"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("field observations")
+        let result = app.descendants(matching: .any)["search.result.document-LearningToolElement-702-1"].firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 20), "Vision text from the image-only page did not become searchable")
+        XCTAssertTrue(element(app, containing: "OCR · may contain errors").exists, "OCR results should be marked")
+        keepScreenshot(app, name: "OCR match for an image-only PDF page")
+        open(result, "Text recognized on page two")
+        XCTAssertTrue(element(app, containing: "Page 2 of 3").waitForExistence(timeout: 15))
+    }
+
     func testWeekCalendarMovesByWeek() throws {
         let app = launch()
         open(rail(app, "calendar"), "Calendar in the rail")

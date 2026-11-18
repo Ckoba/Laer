@@ -96,6 +96,7 @@ final class AppModel {
     @ObservationIgnored var searchDocumentQueue: [String: SearchDocumentWork] = [:]
     @ObservationIgnored var searchOCRBatch: Task<DocumentOCRBatch, Error>?
     var searchOCRIsRunning = false
+    var searchOCRPowerPaused = ProcessInfo.processInfo.isLowPowerModeEnabled
     var searchIndexedAt: Date?
     var isIndexing = false
     private(set) var courses: [Course] = []
@@ -954,7 +955,8 @@ final class AppModel {
         }
         let staged = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         do {
-            try FixtureFiles.pdf(title: resource.title).write(to: staged)
+            let scannedPage = UserDefaults.standard.bool(forKey: "LaerFixtureScannedPDF") ? 2 : nil
+            try FixtureFiles.pdf(title: resource.title, scannedPage: scannedPage).write(to: staged)
             let asset = try await downloads.commit(
                 stagedFile: staged, resourceKey: resource.id, suggestedName: "\(resource.title).pdf",
                 contentType: "application/pdf", at: Date()

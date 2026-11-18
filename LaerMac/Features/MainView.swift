@@ -54,6 +54,9 @@ struct MainView: View {
             navigation.restoresSearch = false
             navigation.isPaletteOpen = false
         }
+        .onReceive(NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange)) { _ in
+            model.updateSearchOCR()
+        }
         .focusedSceneValue(\.openPalette, PaletteAction { navigation.isPaletteOpen = true })
         .alert("Make lecture briefs on this Mac?", isPresented: Binding(
             get: { model.briefs.shouldAsk },

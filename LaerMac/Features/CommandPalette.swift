@@ -23,7 +23,7 @@ struct CommandPalette: View {
     @FocusState private var isFieldFocused: Bool
     @AppStorage("LaerSearchOnline") private var onlineEnabled = false
     @AppStorage("LaerIndexArchivedCourses") private var indexArchived = false
-    @AppStorage(AppModel.searchOCRPreference) private var recognizesPDFs = false
+    @AppStorage(AppModel.searchOCRPreference) private var recognizesScans = false
 
     init(restoring state: SearchReturnState? = nil) {
         guard let state else { return }
@@ -47,7 +47,7 @@ struct CommandPalette: View {
         case everywhere, active, course
     }
 
-    private static let fileTypes = ["pdf", "pptx", "docx", "xlsx"]
+    private static let fileTypes = ["pdf", "txt", "png", "jpg", "jpeg", "pptx", "docx", "xlsx"]
 
     private var currentCourseId: Int? {
         if case .course(let id) = model.selection { return id }
@@ -159,7 +159,7 @@ struct CommandPalette: View {
         }
         .onChange(of: kind) { if kind != .material { fileType = nil } }
         .onChange(of: indexArchived) { Task { await model.changeSearchCoverage() } }
-        .onChange(of: recognizesPDFs) { model.updateSearchOCR() }
+        .onChange(of: recognizesScans) { model.updateSearchOCR() }
         .onChange(of: query) {
             keepsRestoredOnline = false
             localHits = []
@@ -257,7 +257,7 @@ struct CommandPalette: View {
             Menu("Search options") {
                 Toggle("Search itslearning online", isOn: $onlineEnabled)
                 Toggle("Index archived courses", isOn: $indexArchived)
-                Toggle("Recognize text in scanned PDFs", isOn: $recognizesPDFs)
+                Toggle("Recognize text in scans and images", isOn: $recognizesScans)
                 Button("Rebuild local search index") { Task { await model.rebuildSearchIndex() } }
                     .disabled(model.isIndexing)
             }
@@ -373,7 +373,7 @@ struct CommandPalette: View {
     private var emptyText: String {
         if query.text.isEmpty && query.fileType == nil { return "Type to search" }
         if model.searchIndexFailed { return "Local search is unavailable" }
-        if searchingOnline || model.isIndexing { return "Searching…" }
+        if searchingOnline || model.isIndexing || model.searchOCRIsRunning { return "Searching…" }
         if onlineSummary?.error != nil || model.searchCoverageIncomplete { return hasSearched ? "No matches in the sources searched" : "" }
         return hasSearched ? "Nothing matches" : ""
     }
@@ -383,6 +383,8 @@ struct CommandPalette: View {
             VStack(alignment: .leading, spacing: Space.s4) {
                 if model.searchIndexFailed {
                     Text("The local index could not be read. Rebuild it under Search options.")
+                } else if recognizesScans && model.searchOCRPowerPaused {
+                    Text("Text recognition paused in Low Power Mode")
                 } else if model.searchOCRIsRunning {
                     Text("Recognizing text on this Mac")
                 } else if model.isIndexing {
