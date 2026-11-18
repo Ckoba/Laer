@@ -47,7 +47,7 @@ struct LaerApp: App {
 }
 
 /// UI tests only: `-LaerUITestWindowSize 1180x760` (with `-LaerUITestReset`) sets the window's
-/// content size once, so screenshots come out at the size people use rather than the minimum.
+/// content size once, limited by the space available on the test display.
 private struct UITestWindowSize: NSViewRepresentable {
     func makeNSView(context: Context) -> SizerView { SizerView() }
     func updateNSView(_ nsView: SizerView, context: Context) {}
@@ -58,7 +58,24 @@ private struct UITestWindowSize: NSViewRepresentable {
         override func viewDidMoveToWindow() {
             guard !applied, let window, let size = Self.requestedSize else { return }
             applied = true
-            DispatchQueue.main.async { window.setContentSize(size) }
+            DispatchQueue.main.async {
+                guard let screen = window.screen ?? NSScreen.main else {
+                    window.setContentSize(size)
+                    return
+                }
+                let visibleFrame = screen.visibleFrame
+                let contentBounds = window.contentRect(forFrameRect: visibleFrame)
+                window.setContentSize(NSSize(
+                    width: min(size.width, contentBounds.width),
+                    height: min(size.height, contentBounds.height)
+                ))
+                if !visibleFrame.contains(window.frame) {
+                    window.setFrameOrigin(NSPoint(
+                        x: visibleFrame.midX - window.frame.width / 2,
+                        y: visibleFrame.midY - window.frame.height / 2
+                    ))
+                }
+            }
         }
 
         private static var requestedSize: NSSize? {
