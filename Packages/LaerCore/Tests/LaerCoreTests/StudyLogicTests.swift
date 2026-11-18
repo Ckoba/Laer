@@ -157,4 +157,25 @@ private var utc: Calendar {
         index.replace(group: "a", with: [])
         #expect(index.count == 1)
     }
+
+    @Test func preservesDistinctFilesWithTheSameNameAndDeduplicatesByIdentity() {
+        var index = SearchIndex()
+        let first = SearchHit(id: "material-17", kind: .material, title: "Notes.pdf", courseId: 1)
+        let second = SearchHit(id: "material-28", kind: .material, title: "Notes.pdf", courseId: 1)
+        index.replace(group: "plan", with: [first])
+        index.replace(group: "folder", with: [first, second])
+
+        let hits = index.search("notes", scope: .everywhere, activeCourseIds: [])
+        #expect(hits.map(\.id) == [first.id, second.id])
+    }
+
+    @Test func exactTitleWinsAndWordsMayBeSeparatedByNewlines() {
+        var index = SearchIndex()
+        index.replace(group: "a", with: [
+            SearchHit(id: "long", kind: .material, title: "CO2 Measurement Notes"),
+            SearchHit(id: "exact", kind: .plan, title: "CO2 Measurement"),
+        ])
+        let hits = index.search("CO2\nmeasurement", scope: .everywhere, activeCourseIds: [])
+        #expect(hits.map(\.id) == ["exact", "long"])
+    }
 }

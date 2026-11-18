@@ -67,6 +67,24 @@ extension ReadResponse {
         await #expect(throws: APIError.server(status: 500)) { try await client.allCourses() }
     }
 
+    @Test func aShortPageWithMoreReportedItemsDoesNotEndTheRead() async throws {
+        let client = ItslearningClient(transport: FixtureTransport { request in
+            let index = request.query.first { $0.name == "PageIndex" }?.value ?? "0"
+            return .json(#"{"EntityArray":[{"CourseId":\#(index),"Title":"Course \#(index)"}],"Total":2,"CurrentPageIndex":\#(index),"PageSize":100}"#)
+        })
+        let result = try await client.allCourses()
+        #expect(result.isComplete)
+        #expect(result.items.map(\.courseId) == [0, 1])
+    }
+
+    @Test func anEmptyPageBeforeTheReportedTotalIsIncomplete() async throws {
+        let client = ItslearningClient(transport: FixtureTransport { _ in
+            .json(#"{"EntityArray":[],"Total":2,"CurrentPageIndex":0,"PageSize":100}"#)
+        })
+        let result = try await client.allCourses()
+        #expect(!result.isComplete)
+    }
+
     @Test func safetyCapReportsIncomplete() async throws {
         let client = ItslearningClient(transport: FixtureTransport { _ in
             .json(#"{"EntityArray":[{"CourseId":1,"Title":"A"}],"Total":100000,"CurrentPageIndex":0,"PageSize":1}"#)
