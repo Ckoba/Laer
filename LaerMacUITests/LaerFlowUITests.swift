@@ -79,7 +79,7 @@ final class LaerFlowUITests: XCTestCase {
         let app = launch()
         XCTAssertTrue(sidebar(app, "course.12").waitForExistence(timeout: 15), "The active course did not show")
         XCTAssertTrue(rail(app, "home").exists)
-        XCTAssertTrue(element(app, containing: "Today").waitForExistence(timeout: 10), "Home did not show")
+        XCTAssertTrue(element(app, containing: "Schedule").waitForExistence(timeout: 10), "Home did not show")
         XCTAssertTrue(sidebar(app, "course.11").waitForExistence(timeout: 5), "The archive list did not open")
     }
 
@@ -91,7 +91,7 @@ final class LaerFlowUITests: XCTestCase {
         openUpdates(app)
         XCTAssertTrue(element(app, containing: "Exam moved to").waitForExistence(timeout: 10), "The course's updates did not show")
 
-        open(tab(app, "Materials"), "The Materials tab")
+        open(tab(app, "Files"), "The Files tab")
         XCTAssertTrue(element(app, containing: "Syllabus.pdf").waitForExistence(timeout: 10))
         XCTAssertTrue(element(app, containing: "Course page").exists)
     }
@@ -116,15 +116,26 @@ final class LaerFlowUITests: XCTestCase {
     func testOpenSavedMaterial() {
         let app = launch()
         openCourseOne(app)
-        open(tab(app, "Materials"), "The Materials tab")
+        open(tab(app, "Files"), "The Files tab")
         let row = element(app, containing: "Syllabus.pdf")
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         row.click()
-        XCTAssertTrue(element(app, labelContainsAll: ["Syllabus.pdf", "Saved"]).waitForExistence(timeout: 15), "The material was not marked saved")
+        XCTAssertTrue(element(app, labelContainsAll: ["Syllabus.pdf", "Downloaded"]).waitForExistence(timeout: 15), "The material was not marked downloaded")
         // The file opens in the right panel, in this window. The window's own close button is left out.
-        let close = app.buttons.matching(NSPredicate(format: "label == 'Close' AND identifier != '_XCUI:CloseWindow'")).firstMatch
+        let close = app.buttons.matching(NSPredicate(format: "label == 'Close file' AND identifier != '_XCUI:CloseWindow'")).firstMatch
         XCTAssertTrue(close.waitForExistence(timeout: 10), "The saved file did not open in the right panel")
         XCTAssertTrue(close.isHittable, "The right panel's close button is outside the window")
+
+        let handle = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Resize file panel'")).firstMatch
+        XCTAssertTrue(handle.waitForExistence(timeout: 5), "The reader's resize divider did not appear")
+        let window = app.windows.firstMatch
+        handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.2, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5)))
+        let toggle = app.buttons["viewer.toggleFull"].firstMatch
+        XCTAssertTrue(waitUntil(timeout: 5) { toggle.label == "Restore split view" }, "Dragging left did not expand the reader")
+        toggle.click()
+        XCTAssertTrue(waitUntil(timeout: 5) { self.tab(app, "Files").isHittable }, "Restoring split view did not reveal the course")
+
         close.click()
         XCTAssertTrue(waitUntil(timeout: 5) { !close.exists }, "Close did not close the right panel")
         row.click()
@@ -138,7 +149,7 @@ final class LaerFlowUITests: XCTestCase {
         open(element(app, containing: "Show previous lectures"), "The previous lectures group")
         open(element(app, labelContainsAll: ["Week one", "2 files"]), "The past plan")
         open(element(app, containing: "Syllabus.pdf"), "The plan's file")
-        let close = app.buttons.matching(NSPredicate(format: "label == 'Close' AND identifier != '_XCUI:CloseWindow'")).firstMatch
+        let close = app.buttons.matching(NSPredicate(format: "label == 'Close file' AND identifier != '_XCUI:CloseWindow'")).firstMatch
         XCTAssertTrue(close.waitForExistence(timeout: 15), "The plan's file did not open in the right panel")
         XCTAssertTrue(close.isHittable, "The right panel's close button is outside the window")
     }
@@ -212,8 +223,12 @@ final class LaerFlowUITests: XCTestCase {
         open(element(app, containing: "Group work"), "The fixture thread")
         let message = element(app, containing: "Here is the outline.")
         XCTAssertTrue(message.waitForExistence(timeout: 10))
-        // The first message is the oldest, "Here is the outline."
-        open(app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Message actions'")).firstMatch, "The message actions menu")
+        // The actions toolbar shows when the pointer is over the message, as for a person using it.
+        message.hover()
+        // A SwiftUI menu button exposes its name as the title and keeps its symbol's description ("More") as the label.
+        let actions = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "title == 'Message actions' OR label == 'Message actions'")).firstMatch
+        open(actions, "The message actions menu")
         let delete = app.menuItems["Delete…"]
         XCTAssertTrue(delete.waitForExistence(timeout: 5))
         delete.click()
@@ -226,7 +241,7 @@ final class LaerFlowUITests: XCTestCase {
     func testCoursePageRendersNatively() {
         let app = launch()
         openCourseOne(app)
-        open(tab(app, "Materials"), "The Materials tab")
+        open(tab(app, "Files"), "The Files tab")
         open(element(app, containing: "Course page"), "The course page material")
         XCTAssertTrue(element(app, containing: "Bring the reader").waitForExistence(timeout: 10))
         XCTAssertEqual(app.webViews.count, 0, "Page content must not render in a web view")
@@ -258,9 +273,9 @@ final class LaerFlowUITests: XCTestCase {
         XCTAssertTrue(course.waitForExistence(timeout: 15))
         course.hover()
         open(app.descendants(matching: .any)["sidebar.expand.12"].firstMatch, "The course chevron")
-        open(sidebar(app, "course.12.Materials"), "The Materials row under the course")
-        XCTAssertTrue(tab(app, "Materials").waitForExistence(timeout: 10))
-        XCTAssertTrue(tab(app, "Materials").isSelected, "The Materials row did not open that tab")
+        open(sidebar(app, "course.12.Files"), "The Files row under the course")
+        XCTAssertTrue(tab(app, "Files").waitForExistence(timeout: 10))
+        XCTAssertTrue(tab(app, "Files").isSelected, "The Files row did not open that tab")
     }
 
     func testParticipantsIsNotOffered() {
@@ -282,15 +297,23 @@ final class LaerFlowUITests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 3) { !app.textFields["Search"].exists }, "Esc did not close the palette")
     }
 
-    func testWeekCalendarMovesByWeek() {
+    func testWeekCalendarMovesByWeek() throws {
         let app = launch()
         open(rail(app, "calendar"), "Calendar in the rail")
         let next = app.buttons["Next week"]
         XCTAssertTrue(next.waitForExistence(timeout: 10))
-        let thisWeek = app.buttons["This week"]
-        XCTAssertFalse(thisWeek.isEnabled, "This week should be disabled on the current week")
+        XCTAssertTrue(app.buttons["Today"].waitForExistence(timeout: 5), "Today should sit between the week arrows")
+        let prefix = "calendar.day."
+        let days = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", prefix))
+        XCTAssertTrue(days.firstMatch.waitForExistence(timeout: 5))
+        let epoch = try XCTUnwrap(TimeInterval(days.firstMatch.identifier.dropFirst(prefix.count)))
+        let initialDay = Date(timeIntervalSince1970: epoch)
+        let advancedDay = try XCTUnwrap(Calendar.current.date(byAdding: .day, value: 7, to: initialDay))
+        let advancedID = prefix + String(Int(advancedDay.timeIntervalSince1970))
         next.click()
-        XCTAssertTrue(waitUntil(timeout: 3) { thisWeek.isEnabled }, "Next week did not move the grid")
+        XCTAssertTrue(days[advancedID].waitForExistence(timeout: 5), "Next week did not advance seven days")
+        app.buttons["Today"].click()
+        XCTAssertTrue(days[prefix + String(Int(epoch))].waitForExistence(timeout: 5), "Today did not return to the original week")
         XCTAssertEqual(app.webViews.count, 0)
     }
 
@@ -316,9 +339,9 @@ final class LaerFlowUITests: XCTestCase {
         open(rail(app, "messages"), "Messages in the rail")
         open(element(app, containing: "Group work"), "The fixture thread")
         XCTAssertFalse(element(app, containing: "Earlier message").exists)
-        open(app.buttons["Show older"], "The show older button")
+        open(app.buttons["Older messages"], "The older messages button")
         XCTAssertTrue(element(app, containing: "Earlier message").waitForExistence(timeout: 10))
-        XCTAssertTrue(waitUntil(timeout: 5) { !app.buttons["Show older"].exists }, "Show older stayed after the last page")
+        XCTAssertTrue(waitUntil(timeout: 5) { !app.buttons["Older messages"].exists }, "Older messages stayed after the last page")
     }
 
     func testSubmitAssignment() {
@@ -340,7 +363,7 @@ final class LaerFlowUITests: XCTestCase {
     func testNonAssignmentTaskDoesNotOpen() {
         let app = launch()
         open(rail(app, "upcoming"), "Upcoming in the rail")
-        open(element(app, containing: "Show no deadline"), "The no deadline group")
+        XCTAssertTrue(element(app, containing: "No deadline").waitForExistence(timeout: 15), "The no deadline section did not appear")
         let quiz = element(app, containing: "Reading quiz")
         XCTAssertTrue(quiz.waitForExistence(timeout: 15))
         quiz.click()

@@ -45,6 +45,10 @@ struct MaterialsView: View {
                     resource: resource,
                     onOpenFolder: { path.append(resource) },
                     onRead: { reading = resource })
+                .environment(\.rowDividerHidden, resource.id == items.last?.id)
+                // Row text starts at the page's inset, like the title: rows reach 8pt into the gutter,
+                // so the hairline and the selected fill share the row's edges as they do in Plans.
+                .padding(.horizontal, -Space.s8)
             }
         }
         .dividedRows()
@@ -65,9 +69,31 @@ struct ResourceRow: View {
 
     private var isSaved: Bool { model.savedAssets[resource.id] != nil }
 
+    @State private var isHovered = false
+
+    /// A downloadable file, as opposed to a page or link that only opens in the reader or on the website.
+    private var isFile: Bool {
+        guard FileAcquirer.canAttempt(resource) else { return false }
+        if resource.learningObjectId != nil || resource.learningObjectInstanceId != nil { return true }
+        let ext = (resource.title as NSString).pathExtension
+        return !ext.isEmpty && ext.count <= 5 && !ext.contains(" ")
+    }
+
+    private var sizeLabel: String? {
+        guard let asset = model.savedAssets[resource.id], asset.byteCount > 0 else { return nil }
+        return asset.byteCount.formatted(.byteCount(style: .file))
+    }
+
+    /// A folder glyph for folders, a link glyph for web items, and the shared per-type file glyph
+    /// that Home, Plans, Search and the viewer tabs use for everything else.
+    private var rowSymbol: String {
+        if resource.isFolder { return Symbol.folder }
+        return isFile || isSaved ? Symbol.file(extension: (resource.title as NSString).pathExtension) : Symbol.link
+    }
+
     var body: some View {
         HStack(spacing: Space.s8) {
-            Image(systemName: resource.isFolder ? Symbol.folder : Symbol.material)
+            Image(systemName: rowSymbol)
                 .font(.system(size: 13, weight: .regular))
                 .frame(width: Size.icon, height: Size.icon)
                 .foregroundStyle(Color.textMuted)
@@ -79,16 +105,17 @@ struct ResourceRow: View {
                     .lineLimit(2)
                 if case .failed(let message) = model.downloadStates[resource.id] {
                     ErrorLine(message)
-                } else if isSaved {
-                    Text("Saved")
-                        .font(Type.t11)
-                        .foregroundStyle(Color.textMuted)
                 }
             }
             Spacer(minLength: Space.s8)
             actions
+                .frame(width: Size.icon, alignment: .center)
+            // Every row opens something, so every row carries the chevron.
+            RowTrailing(date: nil, chevron: true)
         }
-        .laerRow()
+        .laerRow(selected: model.viewerItem?.id == resource.id)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
         .onTapGesture { primaryAction() }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
@@ -98,23 +125,17 @@ struct ResourceRow: View {
 
     @ViewBuilder private var actions: some View {
         if resource.isFolder {
-            Image(systemName: Symbol.disclosure)
-                .font(.system(size: 11, weight: .regular))
-                .foregroundStyle(Color.textMuted)
-                .accessibilityHidden(true)
+            EmptyView()
         } else if model.downloadStates[resource.id] == .downloading {
             Spinner()
         } else if isSaved {
-            IconButton(Symbol.open, label: "Open") { Task { await openSaved() } }
-        } else if FileAcquirer.canAttempt(resource) {
-            IconButton(Symbol.save, label: "Save") { Task { await model.download(resource) } }
-        } else if canRead {
-            Image(systemName: Symbol.disclosure)
+            Image(systemName: Symbol.saved)
                 .font(.system(size: 11, weight: .regular))
                 .foregroundStyle(Color.textMuted)
-                .accessibilityHidden(true)
-        } else if let url = originalURL {
-            IconButton(Symbol.open, label: "Open on the website") { NSWorkspace.shared.open(url) }
+                .accessibilityLabel("Downloaded")
+                .help("Downloaded")
+        } else if isFile, isHovered {
+            IconButton(Symbol.save, label: "Download") { Task { await model.download(resource) } }
         }
     }
 
@@ -154,11 +175,12 @@ struct ResourceRow: View {
     }
 
     private func primaryAction() {
+        guard model.downloadStates[resource.id] != .downloading else { return }
         if resource.isFolder {
             onOpenFolder()
         } else if isSaved {
             Task { await openSaved() }
-        } else if FileAcquirer.canAttempt(resource), model.downloadStates[resource.id] != .downloading {
+        } else if FileAcquirer.canAttempt(resource) {
             Task {
                 await model.download(resource)
                 if model.savedAssets[resource.id] != nil {
@@ -171,6 +193,8 @@ struct ResourceRow: View {
             }
         } else if canRead {
             onRead()
+        } else if let url = originalURL {
+            NSWorkspace.shared.open(url)
         }
     }
 

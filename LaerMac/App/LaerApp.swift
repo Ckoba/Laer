@@ -16,6 +16,7 @@ struct LaerApp: App {
                 .environment(model)
                 .environment(updater)
                 .frame(minWidth: 860, minHeight: 520)
+                .background(UITestWindowSize())
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                     Task { await model.refreshIfStale() }
                 }
@@ -42,5 +43,32 @@ struct LaerApp: App {
                 .accessibilityLabel("Laer")
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+/// UI tests only: `-LaerUITestWindowSize 1180x760` (with `-LaerUITestReset`) sets the window's
+/// content size once, so screenshots come out at the size people use rather than the minimum.
+private struct UITestWindowSize: NSViewRepresentable {
+    func makeNSView(context: Context) -> SizerView { SizerView() }
+    func updateNSView(_ nsView: SizerView, context: Context) {}
+
+    final class SizerView: NSView {
+        private var applied = false
+
+        override func viewDidMoveToWindow() {
+            guard !applied, let window, let size = Self.requestedSize else { return }
+            applied = true
+            DispatchQueue.main.async { window.setContentSize(size) }
+        }
+
+        private static var requestedSize: NSSize? {
+            let arguments = ProcessInfo.processInfo.arguments
+            guard arguments.contains("-LaerUITestReset"),
+                  let flag = arguments.firstIndex(of: "-LaerUITestWindowSize"),
+                  arguments.indices.contains(flag + 1) else { return nil }
+            let parts = arguments[flag + 1].lowercased().split(separator: "x").compactMap { Double($0) }
+            guard parts.count == 2, parts[0] >= 400, parts[1] >= 300 else { return nil }
+            return NSSize(width: parts[0], height: parts[1])
+        }
     }
 }

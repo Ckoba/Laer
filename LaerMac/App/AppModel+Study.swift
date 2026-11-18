@@ -43,11 +43,14 @@ extension AppModel {
 
     /// Loads what a course opens to, so switching between active courses is instant.
     func prefetchActiveCourses() async {
+        let store = snapshots
         for course in activeCourses {
+            guard !Task.isCancelled, store === snapshots else { return }
             let id = course.courseId
             async let plans: Void = loadPlans(courseId: id)
+            async let topics: Void = loadTopics(courseId: id)
             async let folder: Void = loadFolder(courseId: id, folderId: nil)
-            _ = await (plans, folder)
+            _ = await (plans, topics, folder)
         }
     }
 
@@ -155,13 +158,17 @@ extension AppModel {
             SearchHit(id: "task-\($0.taskId)", kind: .task, title: $0.title, detail: $0.courseTitle, courseId: $0.courseId, date: $0.deadline, url: $0.url)
         })
 
-        guard let client = indexingClient() else { return }
+        guard let client = indexingClient(), let store = snapshots, case .ready = authState else { return }
+        let session = authState
+        func isCurrent() -> Bool { !Task.isCancelled && store === snapshots && session == authState }
         for course in activeCourses + archivedCourses {
             let deep = activeCourses.contains(course)
-            let hits = await Self.indexCourse(course, client: client, deep: deep)
+            let hits = await Self.indexCourse(course, client: client, topics: topics[course.courseId] ?? [], deep: deep)
+            guard isCurrent() else { return }
             if let hits { replaceSearchGroup("course-\(course.courseId)", hits) }
         }
         if let threads = try? await client.messageThreads(pageSize: 30) {
+            guard isCurrent() else { return }
             replaceSearchGroup("messages", threads.threads.map { thread in
                 SearchHit(
                     id: "thread-\(thread.threadId)", kind: .message,
@@ -170,16 +177,19 @@ extension AppModel {
                 )
             })
         }
+        guard isCurrent() else { return }
         let horizon = Calendar.current.date(byAdding: .month, value: -2, to: Date()) ?? Date()
         if let events = try? await client.calendarEvents(from: horizon) {
+            guard isCurrent() else { return }
             replaceSearchGroup("events", events.items.map {
                 SearchHit(id: "event-\($0.eventId)", kind: .event, title: $0.title ?? "Event", detail: $0.displayLocation, courseId: $0.courseId, date: $0.fromDate)
             })
         }
+        guard isCurrent() else { return }
         let now = Date()
         searchIndexedAt = now
         let groups = searchIndex.records.map { SearchGroup(group: $0.key, hits: $0.value) }
-        try? await snapshots?.save(groups, collection: "search-index", coverage: .complete, checkpoint: nil, at: now)
+        try? await store.save(groups, collection: "search-index", coverage: .complete, checkpoint: nil, at: now)
     }
 
     private func replaceSearchGroup(_ group: String, _ hits: [SearchHit]) {
@@ -187,7 +197,9 @@ extension AppModel {
     }
 
     /// Plans, their elements and folder contents. Active courses walk their folders, others stay shallow.
-    private nonisolated static func indexCourse(_ course: Course, client: ItslearningClient, deep: Bool) async -> [SearchHit]? {
+    private nonisolated static func indexCourse(
+        _ course: Course, client: ItslearningClient, topics: [Topic], deep: Bool
+    ) async -> [SearchHit]? {
         var hits: [SearchHit] = []
         var succeeded = false
         if let plans = try? await client.plans(courseId: course.courseId) {
@@ -195,7 +207,8 @@ extension AppModel {
             for plan in plans.items {
                 hits.append(SearchHit(
                     id: "plan-\(plan.planId)", kind: .plan, title: plan.name ?? "Plan",
-                    detail: course.shortTitle, courseId: course.courseId, date: plan.start, url: plan.url
+                    detail: [course.shortTitle, PlanTopics.displayName(of: plan, topics: topics)].compactMap { $0 }.joined(separator: ", "),
+                    courseId: course.courseId, date: plan.start, url: plan.url
                 ))
                 for element in plan.elements ?? [] where element.isFolder != true {
                     let resource = Resource(planElement: element, courseId: course.courseId)

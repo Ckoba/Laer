@@ -21,22 +21,19 @@ final class Navigation {
     }
 }
 
-/// The thin icon strip at the window's left edge.
+/// The thin icon strip at the window's left edge, shown when the sidebar is hidden. Search,
+/// refresh and the bell stay in the top bar, so they never move between the two layouts.
 struct Rail: View {
     @Environment(AppModel.self) private var model
     @Environment(Updater.self) private var updater
     @Environment(Navigation.self) private var navigation
-    @FocusedValue(\.refreshCurrent) private var refreshCurrent
 
     var body: some View {
         VStack(spacing: Space.s4) {
-            RailButton(symbol: Symbol.search, label: "Search", identifier: "rail.search", isSelected: navigation.isPaletteOpen) {
-                navigation.isPaletteOpen = true
-            }
-            RailButton(symbol: Symbol.home, label: "Home", identifier: "rail.home", isSelected: model.selection == .home) {
+            RailButton(symbol: Symbol.home, label: "Home", identifier: "rail.home", isSelected: model.selection == .home || model.selection == nil) {
                 model.selection = .home
             }
-            RailButton(symbol: Symbol.task, label: "Upcoming", identifier: "rail.upcoming", isSelected: model.selection == .upcoming) {
+            RailButton(symbol: Symbol.task, label: "Assignments", identifier: "rail.upcoming", isSelected: model.selection == .upcoming) {
                 model.selection = .upcoming
             }
             if ParityGate.personalCalendar {
@@ -49,7 +46,27 @@ struct Rail: View {
                     model.selection = .messages
                 }
             }
-            Spacer(minLength: 0)
+            // One monogram per course, in its own colour, so courses stay reachable with the sidebar hidden.
+            if !model.courses.isEmpty {
+                Rectangle()
+                    .fill(Color.borderStrong)
+                    .frame(width: Size.icon, height: 1)
+                    .padding(.vertical, Space.s4)
+                    .accessibilityHidden(true)
+            }
+            ScrollView {
+                VStack(spacing: Space.s2) {
+                    ForEach(model.activeCourses) { course in
+                        RailCourseDot(course: course, isSelected: model.selection == .course(course.courseId))
+                    }
+                }
+                // A scroll view puts narrower content at its leading edge; full width centres
+                // the tiles on the rail's line, under the window buttons.
+                .frame(maxWidth: .infinity)
+            }
+            .scrollIndicators(.hidden)
+            // The course list takes what room is left and scrolls when it does not fit.
+            .scrollBounceBehavior(.basedOnSize)
             if updater.isVisible {
                 UpdateRailButton()
             }
@@ -62,17 +79,11 @@ struct Rail: View {
                         .environment(navigation)
                 }
             }
-            IconButton(Symbol.refresh, label: "Refresh") {
-                let current = refreshCurrent
-                Task {
-                    await model.refreshAll()
-                    await current?.run()
-                }
-            }
-            .frame(width: Size.control + Space.s4, height: Size.control + Space.s4)
         }
         .padding(.bottom, Space.s8)
-        .padding(.top, Space.s8)
+        // The first icon centres 22pt below the rail's top edge, on the file reader's 44pt tab
+        // row (16pt half-height button plus 6pt), so the two read as one line.
+        .padding(.top, Space.s6)
         .frame(width: Size.rail)
         .frame(maxHeight: .infinity)
         .background(Color.rail)
@@ -88,15 +99,65 @@ private struct RailButton: View {
 
     var body: some View {
         IconButton(symbol, label: label, action: action)
-            .frame(width: Size.control + Space.s4, height: Size.control + Space.s4)
-            .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(isSelected ? Color.selected : Color.clear))
+            .frame(width: Size.railTile, height: Size.railTile)
+            .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(isSelected ? Color.sidebarSelected : Color.clear))
             .accessibilityAddTraits(isSelected ? .isSelected : [])
             .accessibilityIdentifier(identifier)
     }
 }
 
+/// A course in the compact rail: a two-letter monogram in a circle tinted with the course's colour
+/// ("Bi", "Ma", "PE"). The chosen course gets the same neutral tile as the rail's nav icons, and a
+/// stronger tint in its circle. The full title is the tooltip and the accessibility label. The
+/// tile is `Size.railTile` wide, centred in the rail, so its centre line is the window buttons'
+/// (and every other rail icon's).
+private struct RailCourseDot: View {
+    @Environment(AppModel.self) private var model
+    let course: Course
+    let isSelected: Bool
+    @State private var isHovering = false
+
+    /// The first word's first two characters, the first in capitals ("Biology B" is "Bi", "7A" is
+    /// "7A"). The tooltip has the full name.
+    static func monogram(_ name: String) -> String {
+        guard let word = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).first else { return "" }
+        let letters = word.prefix(2)
+        return String(letters.prefix(1).uppercased() + letters.dropFirst())
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Radius.m, style: .continuous)
+        let colour = Color.course(course.courseId)
+        Button { model.selection = .course(course.courseId) } label: {
+            Text(Self.monogram(course.shortTitle))
+                .font(Type.rail)
+                .foregroundStyle(colour)
+                .lineLimit(1)
+                .frame(width: Size.monogram, height: Size.monogram)
+                .background(Circle().fill(colour.opacity(isSelected ? 0.34 : 0.16)))
+                .accessibilityHidden(true)
+                .frame(width: Size.railTile, height: Size.railTile)
+                .background(shape.fill(isSelected ? Color.sidebarSelected : isHovering ? Color.sidebarHover : Color.clear))
+                .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .onHover { hovering in
+            if hovering {
+                isHovering = true
+            } else {
+                hoverEnded { isHovering = false }
+            }
+        }
+        .help(course.displayTitle)
+        .accessibilityLabel(course.displayTitle)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityIdentifier("rail.course.\(course.courseId)")
+    }
+}
+
 /// Shown above Archived while a new version is out. One click starts the update; the popover shows its progress.
-private struct UpdateRailButton: View {
+struct UpdateRailButton: View {
     @Environment(Updater.self) private var updater
     @State private var isOpen = false
 
@@ -222,7 +283,7 @@ private struct UpdateProgressView: View {
 }
 
 /// Courses that aren't active, from the rail. A pick opens the course and closes the list.
-private struct ArchiveList: View {
+struct ArchiveList: View {
     @Environment(AppModel.self) private var model
     @Environment(Navigation.self) private var navigation
     @State private var action = WriteAction()

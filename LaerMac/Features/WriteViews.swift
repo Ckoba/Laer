@@ -422,6 +422,7 @@ private struct CommentRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s4) {
             HStack(spacing: Space.s8) {
+                Avatar(name: comment.author?.fullName, imageURL: comment.author?.imageURLString, size: 28)
                 Text(comment.author?.fullName ?? "Unknown author")
                     .font(Type.t12.weight(.semibold))
                     .foregroundStyle(Color.text)

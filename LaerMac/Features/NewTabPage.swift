@@ -23,7 +23,7 @@ struct NewTabPage: View {
             .frame(maxWidth: .infinity)
         }
         .defaultScrollAnchor(.center)
-        .background(Color.viewerPanel)
+        .background(Color.chrome)
     }
 
     // MARK: - Search
@@ -128,7 +128,7 @@ struct NewTabPage: View {
             Tile(symbol: Symbol.announcements, title: "Announcements", detail: announcementsDetail, badge: newAnnouncements, identifier: "newTab.announcements") {
                 go(to: .home)
             }
-            Tile(symbol: Symbol.task, title: "Upcoming", detail: upcomingDetail, identifier: "newTab.upcoming") {
+            Tile(symbol: Symbol.task, title: "Assignments", detail: upcomingDetail, identifier: "newTab.upcoming") {
                 go(to: .upcoming)
             }
         }

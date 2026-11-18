@@ -15,14 +15,18 @@ struct NotificationsButton: View {
         IconButton(Symbol.update, label: unread > 0 ? "Notifications, \(unread) unread" : "Notifications") {
             isOpen.toggle()
         }
-        // The count sits under the bell's corner, in text colour; no badge shape.
-        .overlay(alignment: .bottomTrailing) {
+        .help("Notifications")
+        // A small accent capsule on the bell's top corner.
+        .overlay(alignment: .topTrailing) {
             if unread > 0 {
                 Text(unread > 99 ? "99+" : unread.formatted())
-                    .font(Type.t11.weight(.semibold))
-                    .foregroundStyle(Color.text)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Color.onAccent)
                     .monospacedDigit()
-                    .offset(x: Space.s4, y: Space.s2)
+                    .padding(.horizontal, 4)
+                    .frame(minWidth: 14, minHeight: 14)
+                    .background(Capsule().fill(Color.accentFill))
+                    .offset(x: 0, y: 3)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
@@ -74,8 +78,9 @@ private struct NotificationList: View {
                         EmptyState(state: loader.state, empty: "No notifications")
                             .padding(.horizontal, Space.s8)
                     }
+                    let anyPublisher = loader.records.contains { $0.isAnonymous != true && $0.publishedBy?.fullName?.isBlank == false }
                     ForEach(loader.records) { item in
-                        NotificationRow(item: item)
+                        NotificationRow(item: item, reservesAvatar: anyPublisher)
                             .contextMenu {
                                 if ParityGate.writes, item.isRead == false {
                                     Button("Mark read") { Task { await markRead([item.notificationId]) } }
@@ -95,25 +100,37 @@ private struct NotificationList: View {
 private struct NotificationRow: View {
     @Environment(AppModel.self) private var model
     let item: ParityNotification
+    /// True when other rows in the list show a picture, so text lines up down the list.
+    var reservesAvatar = false
+
+    /// The publisher, unless the site hides them.
+    private var publisher: ParityPerson? { item.isAnonymous == true ? nil : item.publishedBy }
 
     var body: some View {
         RowButton(action: open) {
-        VStack(alignment: .leading, spacing: Space.s2) {
-            Text(RichTextCache.plainText(item.text ?? ""))
-                .font(item.isRead == false ? Type.t13.weight(.semibold) : Type.t13)
-                .foregroundStyle(Color.text)
-                .lineLimit(3)
-            HStack(spacing: Space.s6) {
-                if let name = item.publishedBy?.fullName, item.isAnonymous != true {
-                    Text(name).lineLimit(1)
+            HStack(alignment: .top, spacing: Space.s8) {
+                if let publisher, publisher.fullName?.isBlank == false {
+                    Avatar(name: publisher.fullName, imageURL: publisher.imageURLString, size: 28)
+                } else if reservesAvatar {
+                    Color.clear.frame(width: 28, height: 28)
                 }
-                if let date = item.published {
-                    Text(date.formatted(.relative(presentation: .named)))
+                VStack(alignment: .leading, spacing: Space.s2) {
+                    Text(RichTextCache.plainText(item.text ?? ""))
+                        .font(item.isRead == false ? Type.t13.weight(.semibold) : Type.t13)
+                        .foregroundStyle(Color.text)
+                        .lineLimit(3)
+                    HStack(spacing: Space.s6) {
+                        if let name = publisher?.fullName {
+                            Text(name).lineLimit(1)
+                        }
+                        if let date = item.published {
+                            Text(StudyDates.relative(date))
+                        }
+                    }
+                    .font(Type.t11)
+                    .foregroundStyle(Color.textMuted)
                 }
             }
-            .font(Type.t11)
-            .foregroundStyle(Color.textMuted)
-        }
         }
         .accessibilityElement(children: .combine)
         .accessibilityValue(item.isRead == false ? "Unread" : "")
@@ -144,10 +161,12 @@ struct BulletinsView: View {
                 EmptyState(state: loader.state, empty: "No recent updates")
             }
             ForEach(sorted) { bulletin in
-                BulletinRow(bulletin: bulletin, showsComments: Binding(
+                BulletinRow(bulletin: bulletin, isLast: bulletin.bulletinId == sorted.last?.bulletinId, showsComments: Binding(
                     get: { openComments.contains(bulletin.bulletinId) },
                     set: { if $0 { openComments.insert(bulletin.bulletinId) } else { openComments.remove(bulletin.bulletinId) } }
                 ))
+                // Row fills reach into the gutter so the text starts at the page title's x.
+                .padding(.horizontal, -Space.s8)
             }
         }
         .dividedRows()
@@ -164,9 +183,11 @@ struct BulletinsView: View {
     }
 }
 
-/// One update: author, a line of it and the date; the chevron opens the whole text and its comments.
+/// One update: author, a line of it and the date; the trailing chevron opens the whole text and its comments.
 private struct BulletinRow: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let bulletin: Bulletin
+    let isLast: Bool
     @Binding var showsComments: Bool
     @State private var isExpanded = false
 
@@ -174,63 +195,86 @@ private struct BulletinRow: View {
 
     var body: some View {
         let count = bulletin.commentsCount ?? 0
-        DisclosureRow(isExpanded: $isExpanded) {
-            HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
-                Text(bulletin.publishedBy?.fullName ?? "Unknown author")
-                    .font(Type.t13.weight(.semibold))
-                    .foregroundStyle(Color.text)
-                    .lineLimit(1)
-                    .layoutPriority(1)
-                if !isExpanded {
-                    Text(preview)
-                        .font(Type.t13)
+        VStack(alignment: .leading, spacing: 0) {
+            RowButton(action: { withMotion(Motion.base, reduceMotion: reduceMotion) { isExpanded.toggle() } }) {
+                HStack(alignment: .top, spacing: Space.s8) {
+                    Avatar(name: bulletin.publishedBy?.fullName, imageURL: bulletin.publishedBy?.imageURLString, size: 28)
+                    HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
+                        // Author on top, then the announcement itself, so the update reads before it opens.
+                        VStack(alignment: .leading, spacing: Space.s4) {
+                            HStack(spacing: Space.s6) {
+                                Text(bulletin.publishedBy?.fullName ?? "Unknown author")
+                                    .font(Type.t13.weight(.semibold))
+                                    .foregroundStyle(Color.text)
+                                    .lineLimit(1)
+                                if bulletin.pinned == true {
+                                    HStack(spacing: Space.s2) {
+                                        Image(systemName: Symbol.pin)
+                                            .font(.system(size: 10, weight: .regular))
+                                            .accessibilityHidden(true)
+                                        Text("Pinned").font(Type.t11)
+                                    }
+                                    .foregroundStyle(Color.textMuted)
+                                }
+                            }
+                            if !isExpanded {
+                                Text(preview)
+                                    .font(Type.t13)
+                                    .foregroundStyle(Color.text)
+                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        Spacer(minLength: Space.s8)
+                        // Count, date and chevron share the trailing edge.
+                        HStack(spacing: Space.s8) {
+                            if count > 0 {
+                                HStack(spacing: Space.s4) {
+                                    Image(systemName: Symbol.comments).font(.system(size: 11, weight: .regular))
+                                    Text(count.formatted()).monospacedDigit()
+                                }
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityLabel(count == 1 ? "1 comment" : "\(count) comments")
+                            }
+                            if let date = bulletin.published {
+                                Text(StudyDates.relative(date))
+                                    .monospacedDigit()
+                                    .help(date.formatted(date: .abbreviated, time: .shortened))
+                            }
+                            Image(systemName: Symbol.disclosure)
+                                .font(.system(size: 10, weight: .semibold))
+                                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                                .accessibilityHidden(true)
+                        }
+                        .font(Type.t11)
                         .foregroundStyle(Color.textMuted)
-                        .lineLimit(1)
-                }
-            }
-        } trailing: {
-            HStack(spacing: Space.s12) {
-                if bulletin.pinned == true {
-                    Image(systemName: Symbol.pin)
-                        .font(.system(size: 11, weight: .regular))
-                        .help("Pinned")
-                        .accessibilityLabel("Pinned")
-                }
-                if count > 0 {
-                    HStack(spacing: Space.s4) {
-                        Image(systemName: Symbol.comments).font(.system(size: 11, weight: .regular))
-                        Text(count.formatted()).monospacedDigit()
                     }
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(count == 1 ? "1 comment" : "\(count) comments")
-                }
-                if let date = bulletin.published {
-                    Text(date.formatted(.relative(presentation: .named)))
-                        .monospacedDigit()
-                        .help(date.formatted(date: .abbreviated, time: .shortened))
                 }
             }
-            .font(Type.t11)
-            .foregroundStyle(Color.textMuted)
-        } children: {
-            VStack(alignment: .leading, spacing: Space.s4) {
-                RichTextView(html: bulletin.text ?? "")
-                if count > 0 || (ParityGate.writes && bulletin.allowComments == true) {
-                    HStack(spacing: Space.s2) {
-                        if ParityGate.writes, bulletin.allowComments == true {
-                            IconButton(Symbol.comment, label: "Write a comment") { showsComments = true }
+            .environment(\.rowDividerHidden, isExpanded || isLast)
+            .accessibilityAddTraits(isExpanded ? .isSelected : [])
+            if isExpanded {
+                VStack(alignment: .leading, spacing: Space.s4) {
+                    RichTextView(html: bulletin.text ?? "")
+                    if count > 0 || (ParityGate.writes && bulletin.allowComments == true) {
+                        HStack(spacing: Space.s2) {
+                            if ParityGate.writes, bulletin.allowComments == true {
+                                IconButton(Symbol.comment, label: "Write a comment") { showsComments = true }
+                            }
+                            if count > 0 {
+                                IconButton(Symbol.comments, label: showsComments ? "Hide comments" : "Show comments") { showsComments.toggle() }
+                            }
                         }
-                        if count > 0 {
-                            IconButton(Symbol.comments, label: showsComments ? "Hide comments" : "Show comments") { showsComments.toggle() }
-                        }
+                        .padding(.leading, -Space.s4)
                     }
-                    .padding(.leading, -Space.s4)
+                    if showsComments {
+                        BulletinComments(bulletin: bulletin)
+                    }
                 }
-                if showsComments {
-                    BulletinComments(bulletin: bulletin)
-                }
+                .padding(.horizontal, Space.s8)
+                .padding(.bottom, Space.s8)
+                if !isLast { RowDivider() }
             }
-            .padding(.horizontal, Space.s8)
         }
         .accessibilityElement(children: .contain)
     }

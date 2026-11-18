@@ -42,41 +42,107 @@ struct SitePickerView: View {
     @State private var highlighted = 0
     /// True once the arrow keys pick a row, so Return opens that row rather than looking the text up.
     @State private var didMoveHighlight = false
+    @FocusState private var fieldFocused: Bool
 
-    private var matches: [Site] { SiteDirectory.search(query, in: model.siteList) }
-    private var hasQuery: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var matches: [Site] { SiteDirectory.search(lookup, in: model.siteList) }
+    private var hasQuery: Bool { !lookup.isEmpty }
+
+    /// The school Return will open, when the current input already resolves to a suggestion.
+    private var chosenSite: Site? {
+        let candidates = matches
+        if didMoveHighlight, candidates.indices.contains(highlighted) { return candidates[highlighted] }
+        let typed = lookup
+        let exact = candidates.first { $0.shortName.caseInsensitiveCompare(typed) == .orderedSame }
+        return exact ?? (typed.contains(where: \.isWhitespace) ? candidates.first : nil)
+    }
+
+    /// The text to look up: a pasted address becomes the first label of its host, so
+    /// `https://school.example.com/path` is looked up as `school`.
+    private var lookup: String { Self.lookupText(query) }
+
+    static func lookupText(_ raw: String) -> String {
+        let typed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.contains(where: \.isWhitespace) else { return typed }
+        let candidate = typed.contains("://") ? typed : (typed.contains(".") || typed.contains("/") ? "https://" + typed : "")
+        guard !candidate.isEmpty, let host = URL(string: candidate)?.host(), host.contains("."),
+              let first = host.split(separator: ".").first, !first.isEmpty
+        else { return typed }
+        return String(first)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Space.s12) {
-            Text("Choose your institution")
-                .font(Type.t18)
-                .foregroundStyle(Color.text)
-                .accessibilityAddTraits(.isHeader)
-            Text("Search by name, or type the first part of the address you sign in at, such as school in school.itslearning.com.")
-                .font(Type.t12)
-                .foregroundStyle(Color.textMuted)
-                .fixedSize(horizontal: false, vertical: true)
-            FieldBox(label: "Institution", text: $query, onSubmit: submit)
+        VStack(spacing: Space.s12) {
+            VStack(alignment: .leading, spacing: Space.s12) {
+                VStack(spacing: Space.s8) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 64, height: 64)
+                        .accessibilityHidden(true)
+                    // The heading is the action; the icon and the line below carry the welcome.
+                    Text("Find your school")
+                        .font(Type.title)
+                        .foregroundStyle(Color.text)
+                        .accessibilityAddTraits(.isHeader)
+                    Text("Your itslearning courses, tasks, timetable and messages in one Mac app.")
+                        .font(Type.body)
+                        .foregroundStyle(Color.textMuted)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.bottom, Space.s8)
+                VStack(alignment: .leading, spacing: Space.s4) {
+                    Text("School or university")
+                        .font(Type.t13.weight(.medium))
+                        .foregroundStyle(Color.text)
+                    SchoolField(label: "Name or itslearning address", text: $query, isFocused: $fieldFocused, onSubmit: submit)
+                        // UI tests find the field by this name.
+                        .accessibilityIdentifier("Institution")
+                    Text("Search by name or paste the itslearning address you use to sign in.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 .onKeyPress(.downArrow) { move(1); return .handled }
                 .onKeyPress(.upArrow) { move(-1); return .handled }
-            if hasQuery, !matches.isEmpty {
-                suggestions
-            }
-            HStack(spacing: Space.s8) {
-                TextButton("Continue", role: .primary, action: submit)
+                if hasQuery, !matches.isEmpty {
+                    suggestions
+                } else if hasQuery, !model.siteList.isEmpty, !model.isResolvingSite, model.siteError == nil {
+                    Text("No match yet. Try the name of your school, or the address from your itslearning sign-in page.")
+                        .font(Type.t12)
+                        .foregroundStyle(Color.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: Space.s8) {
+                    Button(action: submit) {
+                        Text(chosenSite.map { "Sign in to \($0.title)" } ?? "Find school")
+                            .font(Type.t13.weight(.medium))
+                            .lineLimit(1)
+                    }
+                    // Bordered prominent, so it still reads as a button while it is disabled.
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!hasQuery || model.isResolvingSite)
-                if model.isResolvingSite { Spinner() }
+                    if model.isResolvingSite { Spinner() }
+                }
+                if let error = model.siteError {
+                    ErrorLine(error)
+                }
             }
-            if let error = model.siteError {
-                ErrorLine(error)
-            }
+            .welcomeCard()
+            Text("Laer is not affiliated with itslearning. Your password is entered on your school’s own sign-in page.")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.textMuted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: WelcomeCard.width)
         }
-        .frame(width: 360)
         .padding(Space.s32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.stage)
+        .background(Color.chrome)
         .task { await model.loadSiteList() }
+        .onAppear { fieldFocused = true }
         .onChange(of: query) {
             highlighted = 0
             didMoveHighlight = false
@@ -128,13 +194,9 @@ struct SitePickerView: View {
     /// and the top suggestion opens only when no site has that short name.
     private func submit() {
         guard hasQuery, !model.isResolvingSite else { return }
-        let typed = query.trimmingCharacters(in: .whitespaces)
-        if didMoveHighlight, matches.indices.contains(highlighted) {
-            choose(matches[highlighted])
-        } else if let exact = matches.first(where: { $0.shortName.caseInsensitiveCompare(typed) == .orderedSame }) {
-            choose(exact)
-        } else if typed.contains(where: \.isWhitespace), let top = matches.first {
-            choose(top)
+        let typed = lookup
+        if let site = chosenSite {
+            choose(site)
         } else {
             Task { await model.chooseSite(shortName: typed, fallback: matches.first) }
         }
@@ -161,16 +223,55 @@ private struct SignInView: View {
             .overlay(alignment: .bottom) { Rectangle().fill(Color.border).frame(height: 1) }
             if model.signInLoadFailed {
                 VStack(spacing: Space.s12) {
-                    ErrorLine("The sign-in page couldn't load. Check your connection.")
+                    ErrorLine("The sign-in page couldn’t load. Check your connection.")
                     TextButton("Try again") { model.retrySignInPage() }
                 }
+                .welcomeCard()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.chrome)
             } else if let session = model.webSession {
                 WebSessionView(webView: session.webView)
             } else {
                 Spinner().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+    }
+}
+
+/// The school field, with its text inset so the caret never sits on the placeholder's first letter.
+private struct SchoolField: View {
+    let label: String
+    @Binding var text: String
+    var isFocused: FocusState<Bool>.Binding
+    var onSubmit: () -> Void
+
+    var body: some View {
+        TextField(label, text: $text)
+            .focused(isFocused)
+            .textFieldStyle(.plain)
+            .font(Type.t13)
+            .foregroundStyle(Color.text)
+            .padding(.leading, Space.s12)
+            .padding(.trailing, Space.s8)
+            .frame(height: Size.control)
+            .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(Color.stage))
+            .overlay(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).strokeBorder(Color.borderStrong, lineWidth: 1))
+            .onSubmit(onSubmit)
+            .accessibilityLabel(label)
+    }
+}
+
+/// The first-run card: a fixed-width raised panel on the stage.
+private enum WelcomeCard {
+    static let width: CGFloat = 420
+}
+
+private extension View {
+    func welcomeCard() -> some View {
+        frame(width: WelcomeCard.width - Space.s24 * 2)
+            .padding(Space.s24)
+            .background(RoundedRectangle(cornerRadius: Radius.l, style: .continuous).fill(Color.stage))
+            .overlay(RoundedRectangle(cornerRadius: Radius.l, style: .continuous).strokeBorder(Color.border, lineWidth: 1))
     }
 }
 

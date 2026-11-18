@@ -4,19 +4,36 @@ import Foundation
 // Identity fields are required; everything else is optional, because institutions and
 // roles see different subsets.
 
-/// A person as the parity routes embed them. Only the display name is kept.
+/// A person as the parity routes embed them: identity, display name and where their picture is.
 public struct ParityPerson: Codable, Sendable, Hashable {
     public var personId: Int?
     public var fullName: String?
+    /// The person's picture, absolute or relative to the site. Absent or empty when they have none.
+    public var profileImageUrl: String?
+    public var profileImageUrlSmall: String?
+
+    /// The full-size picture when the site gives one, else the small one.
+    public var imageURLString: String? { ProfileImage.firstUsable(profileImageUrl, profileImageUrlSmall) }
 
     enum CodingKeys: String, CodingKey {
         case personId = "PersonId"
         case fullName = "FullName"
+        case profileImageUrl = "ProfileImageUrl"
+        case profileImageUrlSmall = "ProfileImageUrlSmall"
     }
 
-    public init(personId: Int? = nil, fullName: String? = nil) {
+    public init(personId: Int? = nil, fullName: String? = nil, profileImageUrl: String? = nil, profileImageUrlSmall: String? = nil) {
         self.personId = personId
         self.fullName = fullName
+        self.profileImageUrl = profileImageUrl
+        self.profileImageUrlSmall = profileImageUrlSmall
+    }
+}
+
+enum ProfileImage {
+    /// The first value that is more than whitespace.
+    static func firstUsable(_ values: String?...) -> String? {
+        values.lazy.compactMap { $0 }.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 }
 
@@ -278,6 +295,8 @@ public struct InstantMessage: Codable, Sendable, Hashable, Identifiable {
     public var created: Date?
     public var createdBy: Int?
     public var createdByName: String?
+    /// The sender's picture as the message itself names it. Use `MessageThread.senderImageURLString(for:)`.
+    public var createdByAvatar: String?
     public var text: String?
     public var attachmentUrl: String?
     public var attachmentName: String?
@@ -297,6 +316,7 @@ public struct InstantMessage: Codable, Sendable, Hashable, Identifiable {
         case created = "Created"
         case createdBy = "CreatedBy"
         case createdByName = "CreatedByName"
+        case createdByAvatar = "CreatedByAvatar"
         case text = "Text"
         case attachmentUrl = "AttachmentUrl"
         case attachmentName = "AttachmentName"
@@ -329,6 +349,20 @@ public struct MessageThread: Codable, Sendable, Hashable, Identifiable {
     }
 
     public var id: Int { threadId }
+
+    /// Where a message's sender's picture is: the message's own avatar field, else the thread's
+    /// participant with the sender's person id (or, without an id, the same name).
+    public func senderImageURLString(for message: InstantMessage) -> String? {
+        if let own = ProfileImage.firstUsable(message.createdByAvatar) { return own }
+        let people = participants ?? []
+        if let sender = message.createdBy, let match = people.first(where: { $0.personId == sender }) {
+            return match.imageURLString
+        }
+        if message.createdBy == nil, let name = message.createdByName, !name.isEmpty {
+            return people.first { $0.fullName == name }?.imageURLString
+        }
+        return nil
+    }
 
     enum CodingKeys: String, CodingKey {
         case threadId = "InstantMessageThreadId"

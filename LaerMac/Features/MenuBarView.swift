@@ -217,7 +217,7 @@ struct LectureReadingRow: View {
     var body: some View {
         RowButton(action: action) {
             HStack(spacing: Space.s6) {
-                Image(systemName: opensInApp ? Symbol.material : Symbol.link)
+                Image(systemName: opensInApp ? Symbol.file(extension: (element.title.map { ($0 as NSString).pathExtension }).flatMap { $0.isEmpty ? nil : $0 }) : Symbol.link)
                     .font(.system(size: 12, weight: .regular))
                     .foregroundStyle(Color.textMuted)
                     .frame(width: Size.icon)
@@ -229,6 +229,7 @@ struct LectureReadingRow: View {
                     .truncationMode(.middle)
                 Spacer(minLength: Space.s8)
                 status
+                RowTrailing(date: nil, chevron: true)
             }
         }
         .accessibilityElement(children: .combine)

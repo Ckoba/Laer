@@ -9,6 +9,8 @@ enum Symbol {
     static let search = "magnifyingglass"
     static let save = "arrow.down.circle"
     static let open = "arrow.up.forward.square"
+    /// Leaving Laer for the website, next to its words (`WebsiteLink`).
+    static let website = "arrow.up.forward"
     static let showInFinder = "folder"
     static let copy = "doc.on.doc"
     static let back = "chevron.backward"
@@ -36,7 +38,7 @@ enum Symbol {
     static let folder = "folder"
     static let link = "link"
     static let task = "checklist"
-    static let message = "bubble.left.and.bubble.right"
+    static let message = "message"
     static let plan = "calendar"
     static let account = "person.crop.circle"
     static let saved = "checkmark.circle"
@@ -46,6 +48,18 @@ enum Symbol {
     static let newTab = "plus"
     static let resources = "folder"
     static let announcements = "megaphone"
+
+    /// One symbol per file type, so a PDF looks the same in Home, Plans, Files, Search and the viewer.
+    static func file(extension ext: String?) -> String {
+        switch (ext ?? "").lowercased() {
+        case "pdf": return "doc.richtext"
+        case "ppt", "pptx", "key", "odp": return "rectangle.on.rectangle"
+        case "xls", "xlsx", "csv", "numbers", "ods": return "tablecells"
+        case "png", "jpg", "jpeg", "gif", "heic", "tif", "tiff", "webp", "svg": return "photo"
+        case "doc", "docx", "txt", "rtf", "pages", "odt": return "doc.text"
+        default: return material
+        }
+    }
 
     /// Icons a person can give their own links.
     static let linkChoices = [

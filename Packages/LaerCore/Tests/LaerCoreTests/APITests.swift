@@ -105,6 +105,8 @@ extension ReadResponse {
         #expect(plans.items[0].planId == 3)
         #expect(plans.items[0].stop == nil)
         #expect(plans.items[0].elements?.first?.id == 9)
+        #expect(plans.items[0].topic?.id == 1)
+        #expect(plans.items[0].topic?.name == "Intro")
     }
 }
 

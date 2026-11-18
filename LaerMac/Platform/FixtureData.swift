@@ -28,6 +28,7 @@ struct FixtureTransport: ReadTransport {
     }
 
     static func body(for request: ReadRequest) -> String? {
+        if ShowcaseFixtures.isOn, let showcase = ShowcaseFixtures.body(for: request) { return showcase }
         if StressFixtures.isOn, let stressed = StressFixtures.body(for: request) { return stressed }
         switch request.routeTemplate {
         case "person/v1":
@@ -42,7 +43,7 @@ struct FixtureTransport: ReadTransport {
             if request.path.contains("/13/") { return page("", count: 0) }
             return page(#"""
             {"NotificationId": 501, "Text": "Week two reading is posted.", "PublishedDate": "2026-10-20T08:00:00Z",
-             "PublishedBy": {"FullName": "Sam Teacher"}, "Url": "/note/501"},
+             "PublishedBy": {"FullName": "Sam Teacher", "ProfileImageUrl": "\#(FixtureAvatars.samPath)"}, "Url": "/note/501"},
             {"NotificationId": 502, "Text": "Room change for Thursday.", "PublishedDate": "2026-10-18T08:00:00Z",
              "PublishedBy": {"FullName": "Sam Teacher"}}
             """#, count: 2)
@@ -66,7 +67,7 @@ struct FixtureTransport: ReadTransport {
         case "tasks/v1":
             return page(#"""
             {"TaskId": 801, "Title": "Essay draft", "LocationId": 11, "LocationTitle": "Course one",
-             "ElementId": 70, "ElementType": "LearningToolElement", "Deadline": "2026-11-05T22:00:00Z", "Status": "Not submitted"},
+             "ElementId": 70, "ElementType": "LearningToolElement", "Deadline": "\#(openDeadline)", "Status": "Not submitted"},
             {"TaskId": 802, "Title": "Reading quiz", "LocationId": 12, "LocationTitle": "Course two", "Homework": true}
             """#, count: 2)
         case "course/{id}/plans/all/v1":
@@ -77,9 +78,16 @@ struct FixtureTransport: ReadTransport {
                "elements": [{"id": 702, "title": "Syllabus.pdf", "isResource": true}, {"id": 701, "title": "Week one", "isFolder": true}]}
             ], "total": 1, "currentPageIndex": 0, "pageSize": 100}
             """#
+        case "courses/{id}/topics/v1":
+            return page("", count: 0)
         default:
             return ParityFixtures.body(for: request)
         }
+    }
+
+    /// A week from now, so the essay assignment is still open whenever the tests run.
+    static var openDeadline: String {
+        ISO8601DateFormatter().string(from: Calendar.current.startOfDay(for: Date()).addingTimeInterval(7 * 86_400 + 22 * 3600))
     }
 
     static func page(_ items: String, count: Int) -> String {
@@ -91,11 +99,12 @@ struct FixtureTransport: ReadTransport {
 enum ParityFixtures {
     static func body(for request: ReadRequest) -> String? {
         switch request.routeTemplate {
+        case "instantmessages/messagethreads/unread/count/v1": return "1"
         case "instantmessages/messagethreads/v4":
             return #"""
             {"Threads": {"EntityArray": [
               {"InstantMessageThreadId": 300, "Name": "Group work", "SortIndex": 900, "LastReadInstantMessageId": 10,
-               "Participants": [{"PersonId": 2, "FullName": "Sam Teacher"}, {"PersonId": 1001, "FullName": "Alex Example"}],
+               "Participants": [{"PersonId": 2, "FullName": "Sam Teacher", "ProfileImageUrl": "\#(FixtureAvatars.samPath)"}, {"PersonId": 1001, "FullName": "Alex Example"}],
                "LastMessage": {"MessageId": 12, "Text": "See you on Thursday.", "CreatedByName": "Sam Teacher", "Created": "2026-10-30T10:00:00Z"},
                "Messages": {"EntityArray": [\#(FixtureWrites.shared.sentMessagesJSON)
                  {"MessageId": 12, "Text": "See you on Thursday.", "CreatedByName": "Sam Teacher", "Created": "2026-10-30T10:00:00Z"},
@@ -126,14 +135,14 @@ enum ParityFixtures {
         case "notifications/v2":
             return FixtureTransport.page(#"""
             {"NotificationId": 1, "Text": "New update in Course one", "PublishedDate": "2026-10-30T10:00:00Z", "IsRead": false,
-             "PublishedBy": {"FullName": "Sam Teacher"}, "Url": "/n/1"},
+             "PublishedBy": {"FullName": "Sam Teacher", "ProfileImageUrl": "\#(FixtureAvatars.samPath)"}, "Url": "/n/1"},
             {"NotificationId": 2, "Text": "Plan updated", "PublishedDate": "2026-10-25T10:00:00Z", "IsRead": true}
             """#, count: 2)
         case "courses/{id}/bulletins/v1":
             if request.path.contains("/13/") { return FixtureTransport.page("", count: 0) }
             return FixtureTransport.page(#"""
             {"LightBulletinId": 5, "Text": "<p>Exam moved to <b>Friday</b>.</p>", "Pinned": true, "AllowComments": true,
-             "CommentsCount": 1, "PublishedDate": "2026-10-28T08:00:00Z", "PublishedBy": {"FullName": "Sam Teacher"}}
+             "CommentsCount": 1, "PublishedDate": "2026-10-28T08:00:00Z", "PublishedBy": {"FullName": "Sam Teacher", "ProfileImageUrl": "\#(FixtureAvatars.samPath)"}}
             """#, count: 1)
         case "lightbulletins/{id}/comments/v1":
             return FixtureTransport.page(#"""
@@ -144,7 +153,7 @@ enum ParityFixtures {
             // Only the CustomActivity task is an assignment; the live site answers others with 403.
             guard request.path.contains("/70/") else { return nil }
             return #"""
-            {"ElementId": 70, "Title": "Essay draft", "Text": "<p>Write <b>500</b> words.</p>", "Deadline": "2026-11-05T22:00:00Z",
+            {"ElementId": 70, "Title": "Essay draft", "Text": "<p>Write <b>500</b> words.</p>", "Deadline": "\#(FixtureTransport.openDeadline)",
              "SubmissionType": "Individual", "Files": [{"FileId": 1, "Name": "brief.pdf", "Size": 2048}]}
             """#
         case "courses/cards/starred/v1":
@@ -290,6 +299,42 @@ enum FixtureFiles {
     }
 }
 
+/// Synthetic profile pictures for fixture mode. Two people have one; everyone else has none, so
+/// their initials show. The paths sit on the fixture host and the avatar loader answers them with a
+/// generated image instead of the network.
+enum FixtureAvatars {
+    static let samPath = "/fixture-avatars/sam.png"
+    static let kimPath = "/fixture-avatars/kim.png"
+
+    /// A JSON member with a leading comma that gives the named person their picture, or nothing.
+    static func field(for name: String) -> String {
+        switch name {
+        case "Sam Teacher": #", "ProfileImageUrl": "\#(samPath)""#
+        case "Kim Example": #", "ProfileImageUrl": "\#(kimPath)""#
+        default: ""
+        }
+    }
+
+    /// A plain head-and-shoulders on a flat ground, 96 pixels square.
+    static func png(for url: URL) -> Data? {
+        let ground: NSColor = url.lastPathComponent.hasPrefix("kim") ? .systemTeal : .systemIndigo
+        let side = 96
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+            let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        ground.setFill()
+        NSRect(x: 0, y: 0, width: side, height: side).fill()
+        NSColor.white.withAlphaComponent(0.85).setFill()
+        NSBezierPath(ovalIn: NSRect(x: 33, y: 46, width: 30, height: 30)).fill()
+        NSBezierPath(ovalIn: NSRect(x: 14, y: -34, width: 68, height: 72)).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        return bitmap.representation(using: .png, properties: [:])
+    }
+}
+
 /// Extremes for checking layout by eye, switched on with `-LaerFixtureStress YES` beside fixture mode:
 /// a very long course name, a current plan with 40 files, long unbroken words, overlapping and
 /// all-day events this week and 30 conversations. Dates are relative to now.
@@ -298,6 +343,7 @@ enum StressFixtures {
 
     static let longCourse = "Comparative Institutional Economics, Political Economy and the History of Economic Thought in Practice, autumn 2026. Example City"
     static let longWord = String(repeating: "Unbrokenword", count: 7)
+    static let longTopic = "Institutions, incentives and the long run: a topic name that keeps going past one line"
 
     private static func date(days: Double = 0, hours: Double = 0) -> String {
         let start = Calendar.current.startOfDay(for: Date())
@@ -320,11 +366,20 @@ enum StressFixtures {
             return #"""
             {"entityArray": [
               {"id": 640, "title": "Lecture on \#(longWord) and the long title of a plan that keeps going", "start": "\#(date(hours: -1))", "stop": "\#(date(days: 1))",
-               "displayDescription": "<p>\#(longWord) \#(longWord)</p>", "courseId": 14, "orderNumber": 1, "elements": [\#(files)]},
-              {"id": 641, "title": "Next week", "start": "\#(date(days: 7))", "stop": "\#(date(days: 8))", "courseId": 14, "orderNumber": 2, "elements": []},
-              {"id": 642, "title": "Earlier week", "start": "\#(date(days: -14))", "stop": "\#(date(days: -13))", "courseId": 14, "orderNumber": 0, "elements": []}
-            ], "total": 3, "currentPageIndex": 0, "pageSize": 100}
+               "displayDescription": "<p>\#(longWord) \#(longWord)</p>", "courseId": 14, "orderNumber": 1, "elements": [\#(files)],
+               "topic": {"id": 1402, "name": "\#(longTopic)"}},
+              {"id": 641, "title": "Next week", "start": "\#(date(days: 7))", "stop": "\#(date(days: 8))", "courseId": 14, "orderNumber": 2, "elements": [],
+               "topic": {"id": 1402, "name": "\#(longTopic)"}},
+              {"id": 642, "title": "Earlier week", "start": "\#(date(days: -14))", "stop": "\#(date(days: -13))", "courseId": 14, "orderNumber": 0, "elements": [],
+               "topic": {"id": 1401, "name": "Introduction"}},
+              {"id": 643, "title": "Course information", "courseId": 14, "orderNumber": 3, "elements": []}
+            ], "total": 4, "currentPageIndex": 0, "pageSize": 100}
             """#
+        case "courses/{id}/topics/v1" where path.contains("/14/"):
+            return FixtureTransport.page(#"""
+            {"TopicId": 1401, "TopicName": "Introduction", "FolderId": 7401},
+            {"TopicId": 1402, "TopicName": "\#(longTopic)", "FolderId": 7402}
+            """#, count: 2)
         case "tasks/v1":
             return FixtureTransport.page(#"""
             {"TaskId": 801, "Title": "Essay draft", "LocationId": 11, "LocationTitle": "Course one",
@@ -360,6 +415,7 @@ enum StressFixtures {
             }
             let items = (past + week + future).joined(separator: ",")
             return FixtureTransport.page(items, count: 7 + 20 + 9)
+        case "instantmessages/messagethreads/unread/count/v1": return "10"
         case "instantmessages/messagethreads/v4":
             let threads = (0..<30).map { index in
                 #"""

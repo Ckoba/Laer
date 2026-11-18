@@ -1,8 +1,8 @@
 // Shared build settings. Personal signing values go in Local.xcconfig, which git ignores.
 
 PRODUCT_BUNDLE_IDENTIFIER = app.laer.Laer
-MARKETING_VERSION = 0.1.2
-CURRENT_PROJECT_VERSION = 3
+MARKETING_VERSION = 0.1.3
+CURRENT_PROJECT_VERSION = 4
 MACOSX_DEPLOYMENT_TARGET = 14.0
 SWIFT_VERSION = 6.0
 CODE_SIGN_STYLE = Automatic

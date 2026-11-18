@@ -97,8 +97,12 @@ final class AppModel {
     private(set) var updatesState: [Int: CollectionState] = [:]
     private(set) var plans: [Int: [PlanPreview]] = [:]
     private(set) var plansState: [Int: CollectionState] = [:]
+    /// A course's topics in the order itslearning lists them. Plans group under these on the Plans tab.
+    private(set) var topics: [Int: [Topic]] = [:]
+    private var topicsRefreshedAt: [Int: Date] = [:]
     /// Briefs made on this Mac from saved readings. See `AppModel+Briefs`.
     let briefs = LectureBriefs()
+    private(set) var unreadThreadCount: Int?
     private(set) var tasks: [StudyTask] = []
     private(set) var tasksState = CollectionState()
     private(set) var resources: [String: [Resource]] = [:]
@@ -455,6 +459,7 @@ final class AppModel {
             return
         }
         #endif
+        AvatarLoader.shared.reset()
         didRefreshAfterVerify = false
         authState = .signingIn
         if let site { Task { await startOAuthSignIn(site: site) } }
@@ -489,12 +494,16 @@ final class AppModel {
     }
 
     private func resetAccountState() {
+        AvatarLoader.shared.reset()
         courses = []
         coursesState = CollectionState()
         updates = [:]
         updatesState = [:]
         plans = [:]
         plansState = [:]
+        topics = [:]
+        topicsRefreshedAt = [:]
+        unreadThreadCount = nil
         tasks = []
         tasksState = CollectionState()
         resources = [:]
@@ -534,6 +543,13 @@ final class AppModel {
         return ItslearningClient(transport: WebKitTransport(session: session))
     }
 
+    /// The Authorization header value for a picture request, only for https on the institution's own
+    /// host. Any other host, or no OAuth session, gets nil. Never put it in a URL or a log.
+    func avatarAuthorization(for url: URL) async -> String? {
+        guard let box = tokenBox, let origin = site?.baseURL, AvatarSession.sameOrigin(url, origin) else { return nil }
+        return "Bearer \(await box.tokens.accessToken)"
+    }
+
     func absoluteURL(_ string: String?) -> URL? {
         guard let string, !string.isEmpty, let site else { return nil }
         guard let url = URL(string: string, relativeTo: site.baseURL)?.absoluteURL,
@@ -564,7 +580,8 @@ final class AppModel {
         async let courses: Void = refreshCourses()
         async let tasks: Void = refreshTasks()
         async let starred: Void = refreshStarred()
-        _ = await (courses, tasks, starred)
+        async let unread: Void = refreshUnreadThreadCount()
+        _ = await (courses, tasks, starred, unread)
         Perf.mark("refresh done")
         if case .course(let id) = selection {
             await refreshUpdates(courseId: id)
@@ -675,6 +692,17 @@ final class AppModel {
         }
     }
 
+    func refreshUnreadThreadCount() async {
+        guard ParityGate.messages, case .ready = authState else { return }
+        let session = authState
+        let store = snapshots
+        let account = generation
+        if let count = try? await fetch(key: "unread-thread-count", { try await $0.unreadThreadCount() }),
+           !Task.isCancelled, account == generation, session == authState, store === snapshots {
+            unreadThreadCount = count
+        }
+    }
+
     func loadTasks() async {
         if isStale(tasksState) { await refreshTasks() }
     }
@@ -730,6 +758,38 @@ final class AppModel {
         } catch {
             plansState[courseId, default: CollectionState()].phase = .failed(message(for: error))
         }
+    }
+
+    /// A course's topic list. A failure leaves the plans' own topic names and order to group by, so
+    /// it is silent; the Plans tab reports its own state.
+    func loadTopics(courseId: Int) async {
+        guard case .ready = authState else { return }
+        let session = authState
+        let store = snapshots
+        let account = generation
+        let key = "topics-\(courseId)"
+        func isCurrent() -> Bool {
+            !Task.isCancelled && account == generation && session == authState && store === snapshots
+        }
+
+        if topics[courseId] == nil, let saved = await store?.load(Topic.self, collection: key) {
+            guard isCurrent() else { return }
+            if topics[courseId] == nil {
+                topics[courseId] = saved.records
+                topicsRefreshedAt[courseId] = saved.lastSuccess
+            }
+        }
+        guard isCurrent(),
+              topicsRefreshedAt[courseId].map({ Date().timeIntervalSince($0) > freshnessThreshold }) ?? true,
+              let result = try? await fetch(key: key, { try await $0.topics(courseId: courseId) }),
+              isCurrent() else { return }
+
+        let now = Date()
+        topics[courseId] = result.items
+        topicsRefreshedAt[courseId] = now
+        try? await store?.save(
+            result.items, collection: key, coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now
+        )
     }
 
     // MARK: - Materials

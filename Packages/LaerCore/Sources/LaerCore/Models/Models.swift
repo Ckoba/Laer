@@ -29,17 +29,21 @@ public struct Person: Codable, Sendable, Hashable {
     public var personId: Int
     public var fullName: String?
     public var timeZoneId: String?
+    /// The person's picture, absolute or relative to the site. Absent when they have none.
+    public var profileImageUrl: String?
 
     enum CodingKeys: String, CodingKey {
         case personId = "PersonId"
         case fullName = "FullName"
         case timeZoneId = "TimeZoneId"
+        case profileImageUrl = "ProfileImageUrl"
     }
 
-    public init(personId: Int, fullName: String? = nil, timeZoneId: String? = nil) {
+    public init(personId: Int, fullName: String? = nil, timeZoneId: String? = nil, profileImageUrl: String? = nil) {
         self.personId = personId
         self.fullName = fullName
         self.timeZoneId = timeZoneId
+        self.profileImageUrl = profileImageUrl
     }
 }
 
@@ -83,7 +87,16 @@ public struct Course: Codable, Sendable, Hashable, Identifiable {
 public struct CourseUpdate: Codable, Sendable, Hashable, Identifiable {
     public struct Author: Codable, Sendable, Hashable {
         public var fullName: String?
-        enum CodingKeys: String, CodingKey { case fullName = "FullName" }
+        public var profileImageUrl: String?
+        public var profileImageUrlSmall: String?
+        enum CodingKeys: String, CodingKey {
+            case fullName = "FullName"
+            case profileImageUrl = "ProfileImageUrl"
+            case profileImageUrlSmall = "ProfileImageUrlSmall"
+        }
+
+        /// The full-size picture when the site gives one, else the small one.
+        public var imageURLString: String? { ProfileImage.firstUsable(profileImageUrl, profileImageUrlSmall) }
     }
 
     public struct Bulletin: Codable, Sendable, Hashable {

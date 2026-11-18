@@ -17,6 +17,9 @@ final class LaerScreenshotUITests: XCTestCase {
             "-ApplePersistenceIgnoreState", "YES", "-LaerUITestReset", "YES",
             "-LaerFixtureMode", "YES", "-LaerFixtureStress", "YES", "-LaerUITestAppearance", appearance,
             "-showsSidebar", "YES", "-viewerPagesLocked", "NO",
+            // The window comes back at the size the last run left it, and the dark walk ends at the
+            // smallest; a set size keeps each walk independent of the one before.
+            "-LaerUITestWindowSize", "1180x760",
         ]
         app.launch()
         let any = app.descendants(matching: .any)
@@ -42,7 +45,7 @@ final class LaerScreenshotUITests: XCTestCase {
 
         click(any["tab.Updates"])
         shot(app, "\(appearance) 07 Course updates")
-        click(any["tab.Materials"])
+        click(any["tab.Files"])
         shot(app, "\(appearance) 08 Course materials")
 
         any["sidebar.course.14"].hover()
@@ -63,7 +66,7 @@ final class LaerScreenshotUITests: XCTestCase {
         }
 
         click(any["sidebar.course.11"].exists ? any["sidebar.course.11"] : any["sidebar.course.12"])
-        click(any["tab.Materials"])
+        click(any["tab.Files"])
         click(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Syllabus.pdf'")).firstMatch)
         settle(2)
         shot(app, "\(appearance) 12 File open")

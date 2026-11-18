@@ -10,6 +10,7 @@ struct ViewerSplit<Detail: View>: View {
     @Environment(AppModel.self) private var model
     @ViewBuilder var detail: () -> Detail
     @State private var dragStartWidth: CGFloat?
+    @State private var isOverHandle = false
 
     private let minPanel: CGFloat = 320
     /// Dragging within this distance of the far edge fills the space.
@@ -38,19 +39,38 @@ struct ViewerSplit<Detail: View>: View {
 
     private func panelWidth(total: CGFloat) -> CGFloat {
         if model.viewerIsFull { return total }
-        return min(max(model.viewerWidth ?? total * 0.5, min(minPanel, total)), total)
+        let minimum = min(minPanel, total)
+        let maximum = max(minimum, total - snapToFull)
+        return min(max(model.viewerWidth ?? total * 0.58, minimum), maximum)
     }
 
     private func resizeHandle(total: CGFloat) -> some View {
-        Rectangle()
-            .fill(Color.border)
-            .frame(width: 1)
-            .frame(width: 8)
+        // The line sits on the panel's own leading edge, so the strip and the page share it. No line when
+        // the file fills the window; the drag still works over the same 10pt.
+        Color.clear
+            .frame(width: 10)
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(model.viewerIsFull ? Color.clear : (isOverHandle ? Color.borderStrong : Color.border))
+                    .frame(width: 1)
+            }
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(Color.textFaint)
+                    .frame(width: 3, height: 36)
+                    .padding(.leading, Space.s2)
+                    .opacity(isOverHandle ? 1 : (model.viewerIsFull ? 0 : 0.75))
+                    .allowsHitTesting(false)
+            }
             .contentShape(Rectangle())
             .onContinuousHover { phase in
                 switch phase {
-                case .active: NSCursor.resizeLeftRight.set()
-                case .ended: NSCursor.arrow.set()
+                case .active:
+                    NSCursor.resizeLeftRight.set()
+                    isOverHandle = true
+                case .ended:
+                    NSCursor.arrow.set()
+                    isOverHandle = false
                 }
             }
             .gesture(
@@ -59,11 +79,13 @@ struct ViewerSplit<Detail: View>: View {
                         let start = dragStartWidth ?? panelWidth(total: total)
                         dragStartWidth = start
                         let width = start - value.translation.width
-                        model.viewerIsFull = total - width < snapToFull
-                        model.viewerWidth = min(width, total)
+                        let isFull = total - width < snapToFull
+                        if !isFull { model.viewerWidth = width }
+                        model.viewerIsFull = isFull
                     }
                     .onEnded { _ in dragStartWidth = nil }
             )
+            .help("Drag the divider to resize the reader")
             .accessibilityLabel("Resize file panel")
     }
 }
@@ -80,17 +102,30 @@ struct FileViewerHost: View {
                         ForEach(model.viewerTabs) { item in
                             FileTab(item: item)
                         }
-                        IconButton(Symbol.newTab, label: "New tab") { model.openNewTab() }
+                        IconButton(Symbol.newTab, label: "New tab", help: "Open a new tab to find another file") { model.openNewTab() }
                             .accessibilityIdentifier("viewer.newTab")
                     }
                 }
+                IconButton(
+                    model.viewerIsFull ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                    label: model.viewerIsFull ? "Restore split view" : "Expand reader"
+                ) { model.viewerIsFull.toggle() }
+                    .help(model.viewerIsFull ? "Restore side-by-side view" : "Expand reader. You can also drag the divider left.")
+                    .accessibilityIdentifier("viewer.toggleFull")
                 if let item = model.viewerItem, item.fileURL != nil {
                     FileMenu(item: item)
                 }
-                IconButton(Symbol.close, label: "Close") { model.closeViewer() }
+                // Tab closes are the small x on each tab; this one closes the whole reader.
+                IconButton(Symbol.close, label: "Close file", help: "Close reader") { model.closeViewer() }
             }
             .padding(.horizontal, Space.s8)
             .frame(height: 44)
+            // The toolbar is the same surface as the document area below it, not a lighter strip.
+            .background(Color.chrome)
+            // The one line between the tab strip and the document; both share the surface's edges.
+            Rectangle()
+                .fill(Color.border)
+                .frame(height: 1)
             ZStack {
                 // Open tabs stay alive, so each keeps its page and zoom.
                 ForEach(model.viewerTabs) { item in
@@ -115,7 +150,7 @@ private struct FileTab: View {
 
     var body: some View {
         HStack(spacing: Space.s6) {
-            Image(systemName: item.isNewTab ? Symbol.newTab : Symbol.material)
+            Image(systemName: item.isNewTab ? Symbol.newTab : Symbol.file(extension: (item.title as NSString).pathExtension))
                 .font(.system(size: 12))
                 .foregroundStyle(Color.textMuted)
             Text(item.title)
@@ -135,6 +170,7 @@ private struct FileTab: View {
             .buttonStyle(.plain)
             .foregroundStyle(Color.textMuted)
             .opacity(isCurrent || isHovering ? 1 : 0)
+            .help("Close tab")
             .accessibilityLabel("Close \(item.title)")
         }
         .padding(.leading, Space.s8)
@@ -215,13 +251,18 @@ private struct FileMenu: View {
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 13))
-                .frame(width: 24, height: 24)
+                .foregroundStyle(Color.textMuted)
+                .frame(width: Size.controlSmall, height: Size.controlSmall)
                 .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
+        // A plain button menu keeps the label's own colour, so the dots match the icon buttons beside them.
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.textMuted)
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("File actions")
+        .help("File actions")
     }
 
     /// Slides with a PDF copy ask which to save, starting from the one on screen.
@@ -446,8 +487,8 @@ private final class PDFController {
         view.autoScales = true
         view.displayMode = .singlePageContinuous
         view.displaysPageBreaks = true
-        // No shadow and no side margin, so the page meets the panel's edges with no line beside it.
-        view.pageShadowsEnabled = false
+        // A soft shadow and a 12pt gap lift each page off the grey canvas in both appearances.
+        view.pageShadowsEnabled = true
         view.pageBreakMargins = NSEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
         view.minScaleFactor = 0.25
         view.maxScaleFactor = 6
@@ -473,6 +514,10 @@ private final class PDFController {
             }
         }
         view.document = box.document
+        for case let scroll as NSScrollView in view.subviews {
+            scroll.automaticallyAdjustsContentInsets = false
+            scroll.contentInsets = NSEdgeInsets()
+        }
         pageCount = box.document?.pageCount ?? 0
         // Fit to the panel again now that the page size is known.
         refit()
@@ -507,6 +552,11 @@ private final class PDFController {
         refit()
         if let anchor { view.go(to: anchor) }
         revision += 1
+    }
+
+    func refitKeeping(pageAt index: Int) {
+        refit()
+        go(toPage: index)
     }
 
     private func refit() {
@@ -550,8 +600,11 @@ private struct PDFPanel: View {
     @State private var controller: PDFController
     @AppStorage("viewerPagesLocked") private var isLocked = false
     @State private var isOpen = false
+    /// The page ticks show only while the pointer is over the document.
+    @State private var isHovering = false
     @State private var frame: CGRect = .zero
     @State private var monitor = MonitorHolder()
+    @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var closeTask: Task<Void, Never>?
 
@@ -569,20 +622,36 @@ private struct PDFPanel: View {
     var body: some View {
         HStack(spacing: 0) {
             ZStack(alignment: .trailing) {
+                // One neutral reading background across the whole document area, so a white page reads as
+                // a page in both appearances. One even gutter on every side; the page's own shadow is the
+                // only edge, and the area runs to the surface's edges with no frame of its own.
                 PDFContent(view: controller.view)
+                    .modifier(NoTopEdgeFade())
+                    // The 12pt gutter is the same on every side in both appearances. Opening always scrolls
+                    // to a page (`go(to:)`), which drops the view's own 6pt margin above the first page,
+                    // so the top inset is the full 12pt here; the bottom keeps 6pt plus the last page's margin.
+                    .padding(.horizontal, Space.s12)
+                    .padding(.top, Space.s12)
+                    .padding(.bottom, Space.s6)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.chrome)
                 if !isLocked {
                     HStack(spacing: Space.s4) {
                         if isOpen { pagesPanel.transition(.opacity) }
                         PageTicks(count: controller.pageCount, current: controller.pageIndex)
+                            .opacity(isHovering || isOpen ? 1 : 0)
+                            .animation(Motion.fast, value: isHovering)
                     }
-                    .padding(.trailing, Space.s4)
+                    .padding(.trailing, Space.s12)
                     .padding(.vertical, Space.s8)
                 }
             }
+            .onHover { isHovering = $0 }
             if isLocked {
                 pagesPanel.padding(Space.s8)
             }
         }
+        .background(Color.chrome)
         .background {
             GeometryReader { proxy in
                 Color.clear
@@ -592,9 +661,19 @@ private struct PDFPanel: View {
         }
         .task {
             await controller.load(url)
-            controller.go(toPage: startPage)
+            // Always land on a page, so the top gutter is the same whether or not a page was asked for.
+            controller.go(toPage: startPage ?? 0)
         }
         .onChange(of: startPage) { _, page in controller.go(toPage: page) }
+        // Expanding or restoring resizes the page; keep the same page in view.
+        .onChange(of: model.viewerIsFull) {
+            guard isCurrent else { return }
+            let index = controller.pageIndex
+            Task {
+                try? await Task.sleep(for: .milliseconds(60))
+                controller.refitKeeping(pageAt: index)
+            }
+        }
         .onAppear(perform: startWatching)
         .onDisappear(perform: stopWatching)
         // Registered here, not in the controller's init: SwiftUI builds and drops a controller each time
@@ -689,7 +768,21 @@ private struct PageTicks: View {
         .background(Color.rail.opacity(0.85), in: Capsule())
         .frame(maxHeight: .infinity)
         .contentShape(Rectangle())
+        .help("Page \(current + 1) of \(count)")
+        .accessibilityElement()
         .accessibilityLabel("Page \(current + 1) of \(count)")
+    }
+}
+
+/// Newer systems fade a scroll view's top edge under the tab bar, which lays a faint band across the
+/// top of the page. The page starts below the bar, so there is nothing to fade.
+private struct NoTopEdgeFade: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26, *) {
+            content.scrollEdgeEffectHidden(true, for: .top)
+        } else {
+            content
+        }
     }
 }
 

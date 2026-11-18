@@ -35,7 +35,7 @@ struct LaerCommands: Commands {
             Button("Home") { model.selection = .home }
                 .keyboardShortcut("0", modifiers: .command)
                 .disabled(!isReady)
-            Button("Upcoming") { model.selection = .upcoming }
+            Button("Assignments") { model.selection = .upcoming }
                 .keyboardShortcut("0", modifiers: [.command, .shift])
                 .disabled(!isReady)
             if ParityGate.personalCalendar {
