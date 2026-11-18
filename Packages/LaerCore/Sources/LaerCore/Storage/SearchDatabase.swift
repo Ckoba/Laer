@@ -133,19 +133,8 @@ public actor SearchDatabase {
         let limit = min(max(0, limit), 501)
         guard limit > 0 else { return [] }
 
-        var clauses: [String] = []
+        var clauses: [String] = ["1"]
         var bindings: [SearchBinding] = []
-        let from: String
-        let relevance: String
-        if let match {
-            from = "search_text JOIN search_records r ON r.rowid = search_text.rowid"
-            relevance = "search_text.rank, "
-            clauses.append("search_text MATCH ?")
-            bindings.append(.text(match))
-        } else {
-            from = "search_records r"
-            relevance = ""
-        }
         if !kinds.isEmpty {
             clauses.append("r.kind IN (\(Self.parameters(kinds.count)))")
             bindings += kinds.map { .text($0.rawValue) }
@@ -164,30 +153,48 @@ public actor SearchDatabase {
             clauses.append("r.course IN (SELECT value FROM json_each(?))")
             bindings.append(.text(String(decoding: try JSONEncoder().encode(activeCourseIds), as: UTF8.self)))
         }
-        bindings.append(.text(SearchIndex.normalize(input)))
-        let selection = """
-            SELECT r.payload, r.body FROM \(from)
-            WHERE \(clauses.joined(separator: " AND "))
-            ORDER BY (r.title = ?) DESC, \(relevance)r.title, r.hit_id, r.collection
-            """
+        let filters = clauses.joined(separator: " AND ")
+        let exact = SearchBinding.text(SearchIndex.normalize(input))
         let decoder = JSONDecoder()
-        let ranked = try db.withStatement(selection) { statement in
-            try db.bind(bindings, to: statement)
-            var seen = Set<String>()
-            var results: [SearchHit] = []
-            while results.count < limit {
-                try Task.checkCancellation()
-                let status = sqlite3_step(statement)
-                if status == SQLITE_DONE { break }
-                try db.check(status, expected: SQLITE_ROW)
-                var hit = try decoder.decode(SearchHit.self, from: db.data(statement, column: 0))
-                if hit.document != nil {
-                    let body = String(decoding: db.data(statement, column: 1), as: UTF8.self)
-                    Self.addExcerpt(to: &hit, from: body, query: input)
+        var seen = Set<String>()
+        var ranked: [SearchHit] = []
+
+        func appendRows(_ select: String, _ arguments: [SearchBinding]) throws {
+            try db.withStatement(select) { statement in
+                try db.bind(arguments, to: statement)
+                while ranked.count < limit {
+                    try Task.checkCancellation()
+                    let status = sqlite3_step(statement)
+                    if status == SQLITE_DONE { return }
+                    try db.check(status, expected: SQLITE_ROW)
+                    var hit = try decoder.decode(SearchHit.self, from: db.data(statement, column: 0))
+                    guard seen.insert(hit.id).inserted else { continue }
+                    if hit.document != nil {
+                        let body = String(decoding: db.data(statement, column: 1), as: UTF8.self)
+                        Self.addExcerpt(to: &hit, from: body, query: input)
+                    }
+                    ranked.append(hit)
                 }
-                if seen.insert(hit.id).inserted { results.append(hit) }
             }
-            return results
+        }
+
+        if let match {
+            try appendRows("""
+                SELECT r.payload, r.body FROM search_records r
+                WHERE \(filters) AND r.title = ? ORDER BY r.hit_id, r.collection
+                """, bindings + [exact])
+            if ranked.count < limit {
+                // Ordering by the FTS rank alone allows SQLite to rank before joining payloads.
+                try appendRows("""
+                    SELECT r.payload, r.body FROM search_text JOIN search_records r ON r.rowid = search_text.rowid
+                    WHERE search_text MATCH ? AND \(filters) ORDER BY search_text.rank
+                    """, [.text(match)] + bindings)
+            }
+        } else {
+            try appendRows("""
+                SELECT r.payload, r.body FROM search_records r
+                WHERE \(filters) ORDER BY r.title, r.hit_id, r.collection
+                """, bindings)
         }
         guard !ranked.isEmpty else { return [] }
         let variants = try db.withStatement("""
@@ -273,8 +280,8 @@ private final class SearchConnection {
 
     func migrate() throws {
         let version = try scalar("PRAGMA user_version")
-        guard version <= 2 else { throw SearchDatabaseError.incompatibleSchema(version) }
-        guard version < 2 else { return }
+        guard version <= 3 else { throw SearchDatabaseError.incompatibleSchema(version) }
+        guard version < 3 else { return }
         try transaction {
             if version == 0 {
                 try exec("""
@@ -304,11 +311,13 @@ private final class SearchConnection {
                 END;
                 """)
             }
-            try exec("""
-                ALTER TABLE search_records ADD COLUMN body TEXT;
-                CREATE TABLE search_versions(collection TEXT PRIMARY KEY, revision TEXT NOT NULL);
-                PRAGMA user_version = 2;
-                """)
+            if version < 2 {
+                try exec("""
+                    ALTER TABLE search_records ADD COLUMN body TEXT;
+                    CREATE TABLE search_versions(collection TEXT PRIMARY KEY, revision TEXT NOT NULL);
+                    """)
+            }
+            try exec("CREATE INDEX search_records_title ON search_records(title); PRAGMA user_version = 3;")
         }
     }
 

@@ -321,7 +321,7 @@ final class LaerFlowUITests: XCTestCase {
         let field = app.textFields["Search"].firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.typeText("Syllabus")
-        let local = app.descendants(matching: .any)["search.result.material-11-learningtoolelement-702"]
+        let local = app.descendants(matching: .any).matching(identifier: "search.result.material-11-learningtoolelement-702")
         let online = app.descendants(matching: .any)["search.result.material-11-learningtoolelement-799"].firstMatch
         XCTAssertTrue(local.firstMatch.waitForExistence(timeout: 10))
         XCTAssertTrue(online.waitForExistence(timeout: 10))
