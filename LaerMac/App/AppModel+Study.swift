@@ -406,6 +406,7 @@ extension AppModel {
             for element in plan.elements ?? [] where element.isFolder != true {
                 let resource = Resource(planElement: element, courseId: courseId)
                 hits.append(Self.materialSearchHit(resource, courseId: courseId, context: (context + [title]).joined(separator: " › ")))
+                if let asset = savedAssets[resource.id] { queueDocumentSearch(asset, resource: resource) }
             }
         }
         await indexSearchGroup("plans-\(courseId)", hits: hits, complete: result.isComplete, store: store)
@@ -417,6 +418,12 @@ extension AppModel {
             Self.materialSearchHit(resource, courseId: courseId, context: context ?? resource.path ?? courseName)
         }
         await indexSearchGroup(Self.folderKey(courseId: courseId, folderId: folderId), hits: hits, complete: result.isComplete, store: store)
+        for item in result.items {
+            guard let asset = savedAssets[item.id], item.courseId == nil || item.courseId == courseId else { continue }
+            var resource = item
+            resource.courseId = courseId
+            queueDocumentSearch(asset, resource: resource)
+        }
     }
 
     private static func materialSearchHit(_ resource: Resource, courseId: Int, context: String?) -> SearchHit {

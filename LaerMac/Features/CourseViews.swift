@@ -729,6 +729,8 @@ struct UpcomingView: View {
         }
         .task(id: navigation.searchTarget?.id) {
             guard case .task(let id) = navigation.searchTarget?.destination else { return }
+            // The previously opened assignment must not obscure a new search target.
+            openAssignment = nil
             await model.loadTasks()
             guard !Task.isCancelled, let task = model.tasks.first(where: { $0.taskId == id }), task.elementId != nil,
                   task.opensAssignment ? ParityGate.assignments : ParityGate.pages else { return }
