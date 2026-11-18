@@ -270,6 +270,7 @@ private struct UpdateRow: View {
 /// when the course has any; otherwise later ones list first and earlier ones collapse.
 struct PlansView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     let course: Course
     @State private var showsPrevious = false
     /// Topic groups the person opened or closed; the others follow `PlanTopicGroup.isCurrent`.
@@ -296,19 +297,29 @@ struct PlansView: View {
         }
         PageScroll(spacing: 0, lazy: true) {
             FreshnessLine(state: state)
-            if items.isEmpty {
-                EmptyState(state: state, empty: "No plans")
-            }
-            if let next = sections.next {
-                NextLectureCard(
-                    plan: next, courseId: course.courseId, note: model.lectureNote(for: next, course: course),
-                    topic: groups == nil ? nil : PlanTopics.displayName(of: next, topics: topics)
-                )
-            }
-            if let groups {
-                topicGroups(groups, featured: sections.next)
+            if case .plan(let courseId, let planId) = navigation.searchTarget?.destination, courseId == course.courseId {
+                Button("All plans", systemImage: Symbol.back) { navigation.searchTarget = nil }
+                    .padding(.bottom, Space.s8)
+                if let plan = items.first(where: { $0.planId == planId }) {
+                    PlanRow(plan: plan, courseId: courseId, note: model.lectureNote(for: plan, course: course), isExpanded: true)
+                        .id(planId)
+                        .accessibilityIdentifier("search.plan.\(planId)")
+                } else {
+                    EmptyState(state: state, empty: "This plan is unavailable")
+                }
             } else {
-                flatSections(sections)
+                if items.isEmpty { EmptyState(state: state, empty: "No plans") }
+                if let next = sections.next {
+                    NextLectureCard(
+                        plan: next, courseId: course.courseId, note: model.lectureNote(for: next, course: course),
+                        topic: groups == nil ? nil : PlanTopics.displayName(of: next, topics: topics)
+                    )
+                }
+                if let groups {
+                    topicGroups(groups, featured: sections.next)
+                } else {
+                    flatSections(sections)
+                }
             }
         }
         .dividedRows()
@@ -526,7 +537,7 @@ private struct PlanRow: View {
     let note: LectureNote?
     /// 13pt in a flat list; plans under a topic use the larger 15pt regular.
     var titleFont: Font = Type.t13
-    @State private var isExpanded = false
+    @State var isExpanded = false
 
     var body: some View {
         let range = plan.rangeText
@@ -676,19 +687,38 @@ private struct PlanElementRow: View {
 
 struct UpcomingView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     @State private var openAssignment: StudyTask?
     @State private var onlyActive = true
     @State private var memo = Memo<UpcomingKey, UpcomingSections>()
 
     var body: some View {
-        if let task = openAssignment, let elementId = task.elementId {
-            if task.opensAssignment {
-                AssignmentView(elementId: elementId, title: task.title) { openAssignment = nil }
+        Group {
+            if let task = openAssignment, let elementId = task.elementId {
+                if task.opensAssignment {
+                    AssignmentView(elementId: elementId, title: task.title) { openAssignment = nil }
+                } else {
+                    PageReaderView(resource: task.pageResource(elementId: elementId)) { openAssignment = nil }
+                }
+            } else if case .task(let id) = navigation.searchTarget?.destination {
+                PageScroll {
+                    Button("All assignments", systemImage: Symbol.back) { navigation.searchTarget = nil }
+                    if let task = model.tasks.first(where: { $0.taskId == id }) {
+                        TaskRow(task: task) { openAssignment = task }
+                    } else {
+                        EmptyState(state: model.tasksState, empty: "This task is unavailable")
+                    }
+                }
             } else {
-                PageReaderView(resource: task.pageResource(elementId: elementId)) { openAssignment = nil }
+                list
             }
-        } else {
-            list
+        }
+        .task(id: navigation.searchTarget?.id) {
+            guard case .task(let id) = navigation.searchTarget?.destination else { return }
+            await model.loadTasks()
+            guard !Task.isCancelled, let task = model.tasks.first(where: { $0.taskId == id }), task.elementId != nil,
+                  task.opensAssignment ? ParityGate.assignments : ParityGate.pages else { return }
+            openAssignment = task
         }
     }
 

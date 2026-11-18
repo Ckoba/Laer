@@ -88,7 +88,10 @@ final class AppModel {
     var recentFiles: [RecentFile] = []
     var recentFilesPersonId: Int?
     var starredIds: Set<Int> = []
-    var searchIndex = SearchIndex()
+    var searchIndex: SearchDatabase?
+    var searchIndexFailed = false
+    var searchCoverageIncomplete = true
+    var searchRevision = 0
     var searchIndexedAt: Date?
     var isIndexing = false
     private(set) var courses: [Course] = []
@@ -517,8 +520,12 @@ final class AppModel {
         recentFiles = []
         recentFilesPersonId = nil
         starredIds = []
-        searchIndex = SearchIndex()
+        searchIndex = nil
         searchIndexedAt = nil
+        searchIndexFailed = false
+        searchCoverageIncomplete = true
+        searchRevision = 0
+        isIndexing = false
         snapshots = nil
         downloads = nil
         briefs.close()
@@ -529,8 +536,6 @@ final class AppModel {
             ?? FileManager.default.temporaryDirectory
         return support.appending(path: "Laer", directoryHint: .isDirectory)
     }
-
-    func indexingClient() -> ItslearningClient? { makeClient() }
 
     private func makeClient() -> ItslearningClient? {
         #if DEBUG
@@ -573,7 +578,7 @@ final class AppModel {
         if let snapshot = await snapshots.load(StoredId.self, collection: "starred") {
             starredIds = Set(snapshot.records.map(\.value))
         }
-        Task(priority: .utility) { await loadSearchIndex() }
+        await loadSearchIndex()
     }
 
     func refreshAll() async {
@@ -661,6 +666,7 @@ final class AppModel {
     }
 
     func refreshCourses() async {
+        let store = snapshots
         coursesState.phase = .loading
         do {
             let result = try await fetch(key: "courses") { try await $0.allCourses() }
@@ -668,6 +674,7 @@ final class AppModel {
             courses = result.items
             try? await snapshots?.save(result.items, collection: "courses", coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
             coursesState = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
+            await indexSearchGroup("courses", hits: result.items.map(Self.courseSearchHit), complete: result.isComplete, store: store)
         } catch is CancellationError {
             coursesState.phase = .idle
         } catch RefreshError.staleGeneration {
@@ -678,6 +685,7 @@ final class AppModel {
     }
 
     func refreshTasks() async {
+        let store = snapshots
         tasksState.phase = .loading
         do {
             let result = try await fetch(key: "tasks") { try await $0.tasks() }
@@ -685,6 +693,7 @@ final class AppModel {
             tasks = result.items
             try? await snapshots?.save(result.items, collection: "tasks", coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
             tasksState = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
+            await indexSearchGroup("tasks", hits: result.items.map(Self.taskSearchHit), complete: result.isComplete, store: store)
         } catch RefreshError.staleGeneration {
             tasksState.phase = .idle
         } catch {
@@ -738,6 +747,7 @@ final class AppModel {
     }
 
     func loadPlans(courseId: Int) async {
+        let store = snapshots
         Perf.mark("plans requested")
         defer { Perf.mark("plans ready") }
         if plans[courseId] == nil,
@@ -753,6 +763,7 @@ final class AppModel {
             plans[courseId] = result.items
             try? await snapshots?.save(result.items, collection: "plans-\(courseId)", coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
             plansState[courseId] = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
+            await indexPlans(result, courseId: courseId, store: store)
         } catch RefreshError.staleGeneration {
             plansState[courseId, default: CollectionState()].phase = .idle
         } catch {
@@ -809,6 +820,7 @@ final class AppModel {
     }
 
     func refreshFolder(courseId: Int, folderId: Int?) async {
+        let store = snapshots
         let key = Self.folderKey(courseId: courseId, folderId: folderId)
         resourcesState[key, default: CollectionState()].phase = .loading
         do {
@@ -823,6 +835,7 @@ final class AppModel {
             resources[key] = result.items
             try? await snapshots?.save(result.items, collection: key, coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
             resourcesState[key] = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
+            await indexFolder(result, courseId: courseId, folderId: folderId, context: nil, store: store)
         } catch RefreshError.staleGeneration {
             resourcesState[key, default: CollectionState()].phase = .idle
         } catch {

@@ -286,7 +286,8 @@ final class RouteProbe {
         let started = Date()
         model.searchIndexedAt = nil
         await model.refreshSearchIndexIfStale()
-        add("V", "index built", outcome: "\(model.searchIndex.count) records", detail: "\(Int(Date().timeIntervalSince(started)))s")
+        let count = try? await model.searchIndex?.count()
+        add("V", "index built", outcome: "\(count ?? 0) records", detail: "\(Int(Date().timeIntervalSince(started)))s")
         let queryStart = Date()
         let pptx = await model.search("", scope: .activeCourses, kinds: [.material], fileExtension: "pptx")
         add("V", "pptx in active courses", outcome: "\(pptx.count)", detail: "\(Int(Date().timeIntervalSince(queryStart) * 1000))ms")

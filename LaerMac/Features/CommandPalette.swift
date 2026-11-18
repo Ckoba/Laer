@@ -10,11 +10,17 @@ struct CommandPalette: View {
     @State private var scope: ScopeChoice = .everywhere
     @State private var kind: SearchKind?
     @State private var fileType: String?
-    @State private var hits: [SearchHit] = []
-    @State private var highlighted = 0
+    @State private var localHits: [SearchHit] = []
+    @State private var onlineHits: [SearchHit] = []
+    @State private var highlighted: String?
+    @State private var visibleCount = 60
+    @State private var onlineSummary: OnlineSearchSummary?
+    @State private var searchingOnline = false
     @State private var hasSearched = false
     @State private var contentHeight: CGFloat = 0
     @FocusState private var isFieldFocused: Bool
+    @AppStorage("LaerSearchOnline") private var onlineEnabled = false
+    @AppStorage("LaerIndexArchivedCourses") private var indexArchived = false
 
     enum ScopeChoice: Hashable {
         case everywhere, active, course
@@ -37,10 +43,37 @@ struct CommandPalette: View {
 
     private struct Query: Equatable {
         var text: String
-        var scope: ScopeChoice
+        var scope: SearchScope
         var kind: SearchKind?
         var fileType: String?
     }
+
+    private struct LocalQuery: Equatable {
+        var query: Query
+        var limit: Int
+        var revision: Int
+    }
+
+    private struct OnlineQuery: Equatable {
+        var query: Query
+        var enabled: Bool
+        var courses: [Int]
+    }
+
+    private var query: Query {
+        Query(text: text.trimmingCharacters(in: .whitespacesAndNewlines), scope: searchScope, kind: kind, fileType: fileType)
+    }
+
+    private var onlineCourses: [Course] {
+        switch searchScope {
+        case .everywhere: return model.activeCourses + model.archivedCourses
+        case .activeCourses: return model.activeCourses
+        case .course(let id): return model.courses.filter { $0.courseId == id }
+        }
+    }
+
+    private var allHits: [SearchHit] { SearchHit.unique(localHits + onlineHits) }
+    private var hits: [SearchHit] { Array(allHits.prefix(visibleCount)) }
 
     var body: some View {
         GeometryReader { geo in
@@ -57,6 +90,7 @@ struct CommandPalette: View {
                     .padding(.bottom, Space.s8)
                 Rectangle().fill(Color.border).frame(height: 1)
                 results
+                status
                 if !hits.isEmpty {
                     Rectangle().fill(Color.border).frame(height: 1)
                     HStack {
@@ -92,7 +126,21 @@ struct CommandPalette: View {
             isFieldFocused = true
         }
         .onChange(of: kind) { if kind != .material { fileType = nil } }
-        .task(id: Query(text: text, scope: scope, kind: kind, fileType: fileType)) { await runSearch() }
+        .onChange(of: indexArchived) { Task { await model.changeSearchCoverage() } }
+        .onChange(of: query) {
+            localHits = []
+            onlineHits = []
+            highlighted = nil
+            onlineSummary = nil
+            hasSearched = false
+            visibleCount = 60
+        }
+        .task(id: LocalQuery(query: query, limit: visibleCount, revision: model.searchRevision)) {
+            await runLocalSearch()
+        }
+        .task(id: OnlineQuery(query: query, enabled: onlineEnabled, courses: onlineCourses.map(\.courseId))) {
+            await runOnlineSearch()
+        }
     }
 
     private var field: some View {
@@ -170,6 +218,13 @@ struct CommandPalette: View {
             .accessibilityLabel("File type")
             }
             Spacer(minLength: 0)
+            Menu("Search options") {
+                Toggle("Search itslearning online", isOn: $onlineEnabled)
+                Toggle("Index archived courses", isOn: $indexArchived)
+                Button("Rebuild local search index") { Task { await model.rebuildSearchIndex() } }
+                    .disabled(model.isIndexing)
+            }
+            .controlSize(.small)
         }
     }
 
@@ -182,6 +237,9 @@ struct CommandPalette: View {
     }
 
     @ViewBuilder private var results: some View {
+        let matches = allHits
+        let visible = Array(matches.prefix(visibleCount))
+        let selectedID = visible.first(where: { $0.id == highlighted })?.id ?? visible.first?.id
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -189,9 +247,9 @@ struct CommandPalette: View {
                         EmptyLine(emptyText)
                             .padding(Space.s8)
                     }
-                    ForEach(Array(hits.enumerated()), id: \.element.id) { index, hit in
-                        if index == 0 || Self.group(hits[index - 1]) != Self.group(hit) {
-                            Text(Self.section(for: hit))
+                    ForEach(Array(visible.enumerated()), id: \.element.id) { index, hit in
+                        if index == 0 {
+                            Text("Best matches")
                                 .font(Type.section)
                                 .foregroundStyle(Color.textMuted)
                                 .padding(.horizontal, Space.s8)
@@ -199,18 +257,22 @@ struct CommandPalette: View {
                                 .padding(.bottom, Space.s4)
                                 .accessibilityAddTraits(.isHeader)
                         }
-                        RowButton(selected: index == highlighted, action: { open(hit) }) {
+                        RowButton(selected: hit.id == selectedID, action: { open(hit) }) {
                             HitRow(hit: hit, subtitle: subtitle(for: hit))
                         }
                         .overlay {
-                            if index == highlighted {
+                            if hit.id == selectedID {
                                 RoundedRectangle(cornerRadius: Radius.m, style: .continuous)
                                     .fill(Color.accent.opacity(0.15))
                                     .allowsHitTesting(false)
                             }
                         }
-                        .id(index)
-                        .onHover { if $0 { highlighted = index } }
+                        .id(hit.id)
+                        .onHover { if $0 { highlighted = hit.id } }
+                    }
+                    if matches.count > visibleCount, visibleCount < 500 {
+                        Button("Show more results") { visibleCount = min(visibleCount + 60, 500) }
+                            .padding(Space.s8)
                     }
                 }
                 .padding(.horizontal, Space.s4)
@@ -221,7 +283,7 @@ struct CommandPalette: View {
             // Hug the rows up to a whole number of rows; past that the scrollbar and the count say there is more.
             .frame(idealHeight: resultsHeight, maxHeight: resultsHeight)
             .scrollIndicators(.visible)
-            .onChange(of: highlighted) { _, index in proxy.scrollTo(index) }
+            .onChange(of: highlighted) { _, id in if let id { proxy.scrollTo(id) } }
         }
     }
 
@@ -236,67 +298,99 @@ struct CommandPalette: View {
     private static let maxResultsHeight: CGFloat = 400
 
     private var emptyText: String {
-        if text.trimmingCharacters(in: .whitespaces).isEmpty { return "Type to search" }
+        if query.text.isEmpty && query.fileType == nil { return "Type to search" }
+        if model.searchIndexFailed { return "Local search is unavailable" }
+        if searchingOnline || model.isIndexing { return "Searching…" }
+        if onlineSummary?.error != nil || model.searchCoverageIncomplete { return hasSearched ? "No matches in the sources searched" : "" }
         return hasSearched ? "Nothing matches" : ""
     }
 
-    private func runSearch() async {
-        let query = text.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else {
-            hits = []
-            hasSearched = false
-            return
+    @ViewBuilder private var status: some View {
+        if !query.text.isEmpty || query.fileType != nil || model.searchIndexFailed {
+            VStack(alignment: .leading, spacing: Space.s4) {
+                if model.searchIndexFailed {
+                    Text("The local index could not be read. Rebuild it under Search options.")
+                } else if model.isIndexing {
+                    Text("Local indexing in progress")
+                } else if model.searchCoverageIncomplete {
+                    Text("Local index coverage is partial")
+                } else {
+                    Text("Local results")
+                }
+                if searchingOnline {
+                    Text("Searching itslearning in \(min(onlineCourses.count, 12)) courses")
+                } else if let summary = onlineSummary {
+                    if let error = summary.error { Text(error) }
+                    Text("Online search checked \(summary.searched) of \(summary.total) courses")
+                    if summary.incomplete { Text("Online results may be partial") }
+                } else if !onlineEnabled {
+                    Text("Online search is off")
+                }
+            }
+            .font(Type.t11)
+            .foregroundStyle(Color.textMuted)
+            .padding(.horizontal, Space.s12)
+            .padding(.vertical, Space.s6)
         }
-        try? await Task.sleep(for: .milliseconds(120))
+    }
+
+    private func runLocalSearch() async {
+        let current = query
+        guard !current.text.isEmpty || current.fileType != nil else { return }
+        try? await Task.sleep(for: .milliseconds(80))
         guard !Task.isCancelled else { return }
-        let kinds: Set<SearchKind> = kind.map { [$0] } ?? Set(SearchKind.allCases)
-        let found = await model.search(query, scope: searchScope, kinds: kinds, fileExtension: fileType)
-        guard !Task.isCancelled else { return }
-        hits = Array(arrange(found).prefix(60))
-        highlighted = 0
+        let kinds: Set<SearchKind> = current.kind.map { [$0] } ?? []
+        let found = await model.search(current.text, scope: current.scope, kinds: kinds,
+                                       fileExtension: current.fileType, limit: visibleCount + 1)
+        guard !Task.isCancelled, current == query else { return }
+        if highlighted == nil { highlighted = selectedHit?.id ?? found.first?.id }
+        localHits = found
         hasSearched = true
     }
 
+    private func runOnlineSearch() async {
+        onlineHits = []
+        onlineSummary = nil
+        searchingOnline = false
+        let current = query
+        let targets = onlineCourses
+        guard onlineEnabled, current.text.count >= 2, current.kind == nil || current.kind == .material, !targets.isEmpty else { return }
+        searchingOnline = true
+        try? await Task.sleep(for: .milliseconds(350))
+        guard !Task.isCancelled, current == query else { return }
+        let summary = await model.onlineSearch(current.text, courses: targets, fileExtension: current.fileType) { newHits in
+            if highlighted == nil { highlighted = selectedHit?.id ?? newHits.first?.id }
+            onlineHits = SearchHit.unique(onlineHits + newHits)
+        }
+        guard !Task.isCancelled, current == query else { return }
+        onlineSummary = summary
+        searchingOnline = false
+    }
+
+    private var selectedHit: SearchHit? { hits.first(where: { $0.id == highlighted }) ?? hits.first }
+
     private func move(_ offset: Int) {
         guard !hits.isEmpty else { return }
-        highlighted = min(max(highlighted + offset, 0), hits.count - 1)
+        let index = hits.firstIndex { $0.id == selectedHit?.id } ?? 0
+        highlighted = hits[min(max(index + offset, 0), hits.count - 1)].id
     }
 
     private func openHighlighted() {
-        guard hits.indices.contains(highlighted) else { return }
-        open(hits[highlighted])
+        if let selectedHit { open(selectedHit) }
     }
 
     private func open(_ hit: SearchHit) {
         close()
-        if hit.kind == .plan, let course = hit.courseId { navigation.courseTabs[course] = .plans }
+        navigation.searchTarget = hit
+        if let course = hit.courseId {
+            if hit.kind == .plan { navigation.courseTabs[course] = .plans }
+            if hit.resource?.isFolder == true { navigation.courseTabs[course] = .materials }
+        }
         model.open(hit)
     }
 
     private func close() {
         navigation.isPaletteOpen = false
-    }
-
-    /// Deduplicates indexed records by identity, then groups by kind, courses first.
-    private func arrange(_ found: [SearchHit]) -> [SearchHit] {
-        var seen = Set<String>()
-        // A class with no time says nothing its course row does not.
-        let unique = found.filter { hit in
-            (hit.kind != .event || hit.date != nil) && seen.insert(hit.id).inserted
-        }
-        let order = Self.sectionOrder
-        let needle = text.trimmingCharacters(in: .whitespaces)
-        // A title that holds the query beats a hit that only inherits it from its course.
-        func direct(_ hit: SearchHit) -> Bool {
-            needle.isEmpty || hit.title.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive]) != nil
-        }
-        return unique.enumerated().sorted { a, b in
-            let ka = order.firstIndex(of: Self.group(a.element)) ?? order.count
-            let kb = order.firstIndex(of: Self.group(b.element)) ?? order.count
-            if ka != kb { return ka < kb }
-            let da = direct(a.element), db = direct(b.element)
-            return da == db ? a.offset < b.offset : da
-        }.map(\.element)
     }
 
     /// A second line that adds to the title, or nothing.
@@ -332,8 +426,6 @@ struct CommandPalette: View {
 
     /// Result groups: a link is not a file, so it gets a group of its own.
     enum Group: Hashable { case course, event, material, link, plan, task, message }
-
-    private static let sectionOrder: [Group] = [.course, .event, .material, .link, .plan, .task, .message]
 
     static func isLink(_ hit: SearchHit) -> Bool {
         guard hit.kind == .material, let resource = hit.resource, !resource.isFolder else { return false }

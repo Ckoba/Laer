@@ -40,6 +40,16 @@ public actor SnapshotStore {
         return opened
     }
 
+    /// Clears the derived search index and its crawl markers. Source snapshots remain readable.
+    public func removeSearchIndex(courseIds: [Int]) throws {
+        index = nil
+        let paths = [directory.appendingPathComponent("search.sqlite"), fileURL(for: "search-coverage")]
+            + courseIds.map { fileURL(for: "search-folders-\($0)") }
+        for url in paths where FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
     /// Replaces the collection atomically. If encoding or writing fails, the previous snapshot,
     /// including its checkpoint, stays in place.
     public func save<R: Codable & Sendable>(
