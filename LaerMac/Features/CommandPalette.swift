@@ -22,6 +22,23 @@ struct CommandPalette: View {
     @AppStorage("LaerSearchOnline") private var onlineEnabled = false
     @AppStorage("LaerIndexArchivedCourses") private var indexArchived = false
 
+    init(restoring state: SearchReturnState? = nil) {
+        guard let state else { return }
+        _text = State(initialValue: state.text)
+        _scope = State(initialValue: state.scope)
+        _kind = State(initialValue: state.kind)
+        _fileType = State(initialValue: state.fileType)
+        _highlighted = State(initialValue: state.selectedID)
+        _visibleCount = State(initialValue: state.visibleCount)
+        _localHits = State(initialValue: state.localHits)
+        _onlineHits = State(initialValue: state.onlineHits)
+        _onlineSummary = State(initialValue: state.onlineSummary)
+        _hasSearched = State(initialValue: true)
+        _keepsRestoredOnline = State(initialValue: state.onlineSummary != nil || !state.onlineHits.isEmpty)
+    }
+
+    @State private var keepsRestoredOnline = false
+
     enum ScopeChoice: Hashable {
         case everywhere, active, course
     }
@@ -128,6 +145,7 @@ struct CommandPalette: View {
         .onChange(of: kind) { if kind != .material { fileType = nil } }
         .onChange(of: indexArchived) { Task { await model.changeSearchCoverage() } }
         .onChange(of: query) {
+            keepsRestoredOnline = false
             localHits = []
             onlineHits = []
             highlighted = nil
@@ -260,6 +278,7 @@ struct CommandPalette: View {
                         RowButton(selected: hit.id == selectedID, action: { open(hit) }) {
                             HitRow(hit: hit, subtitle: subtitle(for: hit))
                         }
+                        .accessibilityIdentifier("search.result.\(hit.id)")
                         .overlay {
                             if hit.id == selectedID {
                                 RoundedRectangle(cornerRadius: Radius.m, style: .continuous)
@@ -349,6 +368,7 @@ struct CommandPalette: View {
     }
 
     private func runOnlineSearch() async {
+        if keepsRestoredOnline { keepsRestoredOnline = false; return }
         onlineHits = []
         onlineSummary = nil
         searchingOnline = false
@@ -380,6 +400,12 @@ struct CommandPalette: View {
     }
 
     private func open(_ hit: SearchHit) {
+        navigation.searchReturn = SearchReturnState(
+            text: text, scope: scope, kind: kind, fileType: fileType, selectedID: hit.id,
+            visibleCount: visibleCount, localHits: localHits, onlineHits: onlineHits, onlineSummary: onlineSummary,
+            previousSelection: model.selection, previousFile: model.viewerItem,
+            courseTabs: navigation.courseTabs, expandedCourses: navigation.expandedCourses
+        )
         close()
         navigation.searchTarget = hit
         if let course = hit.courseId {
@@ -390,6 +416,7 @@ struct CommandPalette: View {
     }
 
     private func close() {
+        navigation.restoresSearch = false
         navigation.isPaletteOpen = false
     }
 
@@ -407,6 +434,10 @@ struct CommandPalette: View {
             if let detail = hit.detail ?? courseTitle(hit.courseId), !detail.isEmpty { parts.append(detail) }
             if let date = hit.date { parts.append(StudyDates.relative(date)) }
         case .material:
+            if let position = hit.document {
+                if let page = position.page { parts.append("Page \(page + 1)") }
+                parts.append("Saved copy")
+            }
             if let detail = hit.detail ?? courseTitle(hit.courseId), !detail.isEmpty {
                 parts.append(detail.replacingOccurrences(of: " / ", with: " › ").replacingOccurrences(of: ", ", with: " › "))
             }
@@ -424,33 +455,9 @@ struct CommandPalette: View {
 
     private static let topOffset: CGFloat = 72
 
-    /// Result groups: a link is not a file, so it gets a group of its own.
-    enum Group: Hashable { case course, event, material, link, plan, task, message }
-
     static func isLink(_ hit: SearchHit) -> Bool {
         guard hit.kind == .material, let resource = hit.resource, !resource.isFolder else { return false }
         return resource.learningObjectId == nil && resource.learningObjectInstanceId == nil && hit.fileExtension == nil
-    }
-
-    static func group(_ hit: SearchHit) -> Group {
-        if isLink(hit) { return .link }
-        return switch hit.kind {
-        case .course: .course
-        case .event: .event
-        case .material: .material
-        case .plan: .plan
-        case .task: .task
-        case .message: .message
-        }
-    }
-
-    static func section(for hit: SearchHit) -> String {
-        if isLink(hit) { return "Links" }
-        return section(for: hit.kind)
-    }
-
-    static func section(for kind: SearchKind) -> String {
-        kind == .event ? "Classes" : title(for: kind)
     }
 
     private func courseTitle(_ id: Int?) -> String? {
@@ -487,11 +494,19 @@ private struct HitRow: View {
 
     /// Folders, links (no file behind them) and files each get their own icon, as in Files.
     private var symbol: String {
+        if hit.document != nil { return Symbol.file(extension: hit.fileExtension ?? "") }
         guard hit.kind == .material, let resource = hit.resource else { return CommandPalette.symbol(for: hit.kind) }
         if resource.isFolder { return Symbol.folder }
         if CommandPalette.isLink(hit) { return Symbol.link }
         let ext = hit.fileExtension ?? (hit.title as NSString).pathExtension
         return Symbol.file(extension: ext)
+    }
+
+    private func highlightedExcerpt(_ excerpt: String) -> Text {
+        guard let match = hit.matchedText, let range = excerpt.range(of: match) else { return Text(verbatim: excerpt) }
+        var attributed = AttributedString(excerpt)
+        if let span = Range(range, in: attributed) { attributed[span].font = Type.t11.weight(.bold) }
+        return Text(attributed)
     }
 
     var body: some View {
@@ -519,6 +534,12 @@ private struct HitRow: View {
                             .foregroundStyle(Color.textMuted)
                             .lineLimit(1)
                     }
+                }
+                if let excerpt = hit.excerpt {
+                    highlightedExcerpt(excerpt)
+                        .font(Type.t11)
+                        .foregroundStyle(Color.textMuted)
+                        .lineLimit(2)
                 }
             }
             Spacer(minLength: Space.s8)

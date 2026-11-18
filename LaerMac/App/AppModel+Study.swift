@@ -22,6 +22,11 @@ struct OnlineSearchSummary {
     var error: String?
 }
 
+struct SearchDocumentWork {
+    var asset: LocalAsset
+    var resource: Resource?
+}
+
 extension AppModel {
     /// Starred courses are the active ones. With none starred, every course counts as active.
     var activeCourses: [Course] {
@@ -108,6 +113,19 @@ extension AppModel {
     }
 
     func open(_ hit: SearchHit) {
+        if let document = hit.document {
+            let downloads = downloads
+            Task {
+                guard let downloads, let asset = await downloads.asset(for: document.resourceKey),
+                      asset.relativePath == document.version, downloads === self.downloads else { return }
+                let url = await downloads.fileURL(for: asset)
+                guard downloads === self.downloads, savedAssets[asset.id] == asset else { return }
+                viewerItem = ViewerItem(id: asset.id, title: hit.title, fileURL: url, startPage: document.page,
+                                        searchMatch: hit.matchedText)
+                if let resource = hit.resource { noteRecent(resource) }
+            }
+            return
+        }
         switch hit.kind {
         case .material:
             if let resource = hit.resource, !resource.isFolder {
@@ -165,7 +183,10 @@ extension AppModel {
                 kinds: kinds, fileExtension: fileExtension, limit: limit
             )
             guard !Task.isCancelled, store === snapshots, index === searchIndex else { return [] }
-            return matches
+            return matches.filter { hit in
+                guard let position = hit.document else { return true }
+                return savedAssets[position.resourceKey]?.relativePath == position.version
+            }
         } catch is CancellationError {
             return []
         } catch {
@@ -186,6 +207,8 @@ extension AppModel {
             searchCoverageIncomplete = coverage?.coverage != .complete
             await indexSearchGroup("courses", hits: courses.map(Self.courseSearchHit), complete: false, store: store)
             await indexSearchGroup("tasks", hits: tasks.map(Self.taskSearchHit), complete: false, store: store)
+            guard store === snapshots else { return }
+            for asset in savedAssets.values { queueDocumentSearch(asset, resource: nil) }
         } catch {
             if store === snapshots { searchIndexFailed = true }
         }
@@ -193,6 +216,9 @@ extension AppModel {
 
     func rebuildSearchIndex() async {
         guard let store = snapshots, !isIndexing else { return }
+        searchDocumentWorker?.cancel()
+        searchDocumentWorker = nil
+        searchDocumentQueue = [:]
         searchIndex = nil
         searchIndexedAt = nil
         searchCoverageIncomplete = true
@@ -426,6 +452,41 @@ extension AppModel {
             return
         } catch {
             if store === snapshots, index === searchIndex { searchIndexFailed = true }
+        }
+    }
+
+    func queueDocumentSearch(_ asset: LocalAsset, resource: Resource?) {
+        let format = (asset.relativePath as NSString).pathExtension.lowercased()
+        guard DocumentSearchText.formats.contains(format), let index = searchIndex, let downloads else { return }
+        searchDocumentQueue[asset.id] = SearchDocumentWork(asset: asset, resource: resource)
+        guard searchDocumentWorker == nil else { return }
+        searchDocumentWorker = Task(priority: .utility) {
+            defer {
+                if index === searchIndex, downloads === self.downloads { searchDocumentWorker = nil }
+            }
+            while !Task.isCancelled, index === searchIndex, downloads === self.downloads,
+                  let key = searchDocumentQueue.keys.first, let work = searchDocumentQueue.removeValue(forKey: key) {
+                do {
+                    if try await index.hasDocument(resourceKey: key, version: work.asset.relativePath) { continue }
+                    let url = await downloads.fileURL(for: work.asset)
+                    let extraction = Task.detached(priority: .utility) { try DocumentSearchText.extract(from: url) }
+                    let result = try await withTaskCancellationHandler {
+                        try await extraction.value
+                    } onCancel: {
+                        extraction.cancel()
+                    }
+                    guard !Task.isCancelled, index === searchIndex, downloads === self.downloads,
+                          savedAssets[key] == work.asset else { continue }
+                    let pages: [DocumentSearchPage]
+                    if case .readable(let extracted, _) = result { pages = extracted } else { pages = [] }
+                    try await index.replaceDocument(asset: work.asset, resource: work.resource, pages: pages)
+                    if index === searchIndex { searchRevision += 1 }
+                } catch is CancellationError {
+                    break
+                } catch {
+                    if index === searchIndex { searchIndexFailed = true }
+                }
+            }
         }
     }
 

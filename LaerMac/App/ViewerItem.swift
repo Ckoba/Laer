@@ -9,6 +9,7 @@ struct ViewerItem: Identifiable, Hashable {
     var fileURL: URL?
     /// A PDF page to show first, zero-based, such as a course's rows in an exam plan.
     var startPage: Int?
+    var searchMatch: String?
 
     /// A New tab page rather than a file.
     var isNewTab: Bool { id.hasPrefix(Self.newTabPrefix) }

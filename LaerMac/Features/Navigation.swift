@@ -2,6 +2,22 @@ import LaerCore
 import Observation
 import SwiftUI
 
+struct SearchReturnState {
+    var text: String
+    var scope: CommandPalette.ScopeChoice
+    var kind: SearchKind?
+    var fileType: String?
+    var selectedID: String?
+    var visibleCount: Int
+    var localHits: [SearchHit]
+    var onlineHits: [SearchHit]
+    var onlineSummary: OnlineSearchSummary?
+    var previousSelection: AppModel.Selection?
+    var previousFile: ViewerItem?
+    var courseTabs: [Int: CourseTab]
+    var expandedCourses: Set<Int>
+}
+
 /// Window-level view state that several screens share: the open course tab per course,
 /// which sidebar rows are expanded and whether the command palette is open.
 @MainActor
@@ -14,6 +30,8 @@ final class Navigation {
     /// A kind the palette starts filtered to, such as materials from the New tab's Resources. Read once.
     var paletteKind: SearchKind?
     var searchTarget: SearchHit?
+    var searchReturn: SearchReturnState?
+    var restoresSearch = false
 
     func tab(for courseId: Int) -> CourseTab { courseTabs[courseId] ?? .plans }
 

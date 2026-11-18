@@ -22,6 +22,9 @@ public struct SearchHit: Codable, Sendable, Hashable, Identifiable {
     public var url: String?
     public var contexts: [String]?
     public var destination: SearchDestination?
+    public var document: SearchDocumentPosition?
+    public var excerpt: String?
+    public var matchedText: String?
 
     public init(id: String, kind: SearchKind, title: String, detail: String? = nil, courseId: Int? = nil, fileExtension: String? = nil, resource: Resource? = nil, date: Date? = nil, url: String? = nil, contexts: [String]? = nil, destination: SearchDestination? = nil) {
         self.id = id
@@ -74,6 +77,18 @@ public struct SearchHit: Codable, Sendable, Hashable, Identifiable {
         guard let range = title.range(of: #"\.[A-Za-z0-9]{1,5}$"#, options: .regularExpression) else { return nil }
         let value = title[range].dropFirst().lowercased()
         return value.allSatisfy(\.isNumber) ? nil : value
+    }
+}
+
+public struct SearchDocumentPosition: Codable, Sendable, Hashable {
+    public let resourceKey: String
+    public let version: String
+    public let page: Int?
+
+    public init(resourceKey: String, version: String, page: Int?) {
+        self.resourceKey = resourceKey
+        self.version = version
+        self.page = page
     }
 }
 

@@ -297,6 +297,40 @@ final class LaerFlowUITests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 3) { !app.textFields["Search"].exists }, "Esc did not close the palette")
     }
 
+    func testPaletteOpensTheIndexedPlan() {
+        let app = launch()
+        openCourseOne(app)
+        open(element(app, containing: "Show previous lectures"), "The indexed plan has loaded")
+        app.typeKey("k", modifierFlags: .command)
+        let field = app.textFields["Search"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("introduction and reading")
+        let result = app.descendants(matching: .any)["search.result.plan-11-601"].firstMatch
+        open(result, "A plan found by its description")
+        XCTAssertTrue(app.descendants(matching: .any)["search.plan.601"].firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(element(app, containing: "Syllabus.pdf").exists, "The exact plan is expanded to its materials")
+    }
+
+    func testPaletteOpensThePageFoundInsideASavedPDF() {
+        let app = launch(["-viewerPagesLocked", "NO"])
+        openCourseOne(app)
+        open(tab(app, "Files"), "The Files tab")
+        open(element(app, containing: "Syllabus.pdf"), "The PDF to save")
+        let close = app.buttons.matching(NSPredicate(format: "label == 'Close file' AND identifier != '_XCUI:CloseWindow'")).firstMatch
+        open(close, "The open PDF")
+        app.typeKey("k", modifierFlags: .command)
+        let field = app.textFields["Search"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("silted up")
+        let result = app.descendants(matching: .any)["search.result.document-LearningToolElement-702-1"].firstMatch
+        open(result, "Text from page two of the saved PDF")
+        let pdf = app.descendants(matching: .any)["viewer.pdf"].firstMatch
+        XCTAssertTrue(waitUntil(timeout: 15) { pdf.exists && pdf.value as? String == "Page 2 of 3" })
+        open(app.buttons["search.return"].firstMatch, "Back to the results")
+        XCTAssertEqual(app.textFields["Search"].firstMatch.value as? String, "silted up")
+        XCTAssertTrue(result.exists)
+    }
+
     func testWeekCalendarMovesByWeek() throws {
         let app = launch()
         open(rail(app, "calendar"), "Calendar in the rail")

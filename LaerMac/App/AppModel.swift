@@ -92,6 +92,8 @@ final class AppModel {
     var searchIndexFailed = false
     var searchCoverageIncomplete = true
     var searchRevision = 0
+    @ObservationIgnored var searchDocumentWorker: Task<Void, Never>?
+    @ObservationIgnored var searchDocumentQueue: [String: SearchDocumentWork] = [:]
     var searchIndexedAt: Date?
     var isIndexing = false
     private(set) var courses: [Course] = []
@@ -526,6 +528,9 @@ final class AppModel {
         searchCoverageIncomplete = true
         searchRevision = 0
         isIndexing = false
+        searchDocumentWorker?.cancel()
+        searchDocumentWorker = nil
+        searchDocumentQueue = [:]
         snapshots = nil
         downloads = nil
         briefs.close()
@@ -869,17 +874,22 @@ final class AppModel {
                 contentType: staged.contentType,
                 at: Date()
             )
+            guard !Task.isCancelled, downloads === self.downloads else { return }
             savedAssets[resource.id] = asset
             downloadStates[resource.id] = .idle
             // A newer copy makes any earlier slide conversion stale.
             SlideConverter.removeCached(for: resource.id)
             convertedFiles[resource.id] = nil
+            queueDocumentSearch(asset, resource: resource)
             scheduleBrief(forReading: resource)
         } catch DownloadError.notADocument {
+            guard downloads === self.downloads else { return }
             downloadStates[resource.id] = .failed("This item only opens on the website.")
         } catch FileAcquirerError.websiteOnly {
+            guard downloads === self.downloads else { return }
             downloadStates[resource.id] = .failed("This item only opens on the website.")
         } catch {
+            guard downloads === self.downloads else { return }
             downloadStates[resource.id] = .failed("The download failed.")
         }
     }
@@ -890,8 +900,19 @@ final class AppModel {
 
     /// Deletes a saved file. Only ever called from an explicit user action.
     func removeSavedFile(_ resource: Resource) async {
-        try? await downloads?.remove(resourceKey: resource.id)
+        guard let downloads else { return }
+        let index = searchIndex
+        do { try await downloads.remove(resourceKey: resource.id) } catch { return }
+        guard downloads === self.downloads else { return }
         savedAssets[resource.id] = nil
+        searchDocumentQueue[resource.id] = nil
+        do {
+            try await index?.removeDocument(resourceKey: resource.id)
+            if index === searchIndex { searchRevision += 1 }
+        } catch {
+            if index === searchIndex { searchIndexFailed = true }
+        }
+        guard downloads === self.downloads else { return }
         SlideConverter.removeCached(for: resource.id)
         convertedFiles[resource.id] = nil
         // Its tab would otherwise show a file that no longer exists.
@@ -928,13 +949,17 @@ final class AppModel {
         let staged = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         do {
             try FixtureFiles.pdf(title: resource.title).write(to: staged)
-            savedAssets[resource.id] = try await downloads.commit(
+            let asset = try await downloads.commit(
                 stagedFile: staged, resourceKey: resource.id, suggestedName: "\(resource.title).pdf",
                 contentType: "application/pdf", at: Date()
             )
+            guard downloads === self.downloads else { return }
+            savedAssets[resource.id] = asset
             downloadStates[resource.id] = .idle
+            queueDocumentSearch(asset, resource: resource)
             scheduleBrief(forReading: resource)
         } catch {
+            guard downloads === self.downloads else { return }
             downloadStates[resource.id] = .failed("The download failed.")
         }
     }

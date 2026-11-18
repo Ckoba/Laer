@@ -18,6 +18,43 @@ public actor SearchDatabase {
     }
 
     public func update(group: String, hits: [SearchHit], complete: Bool) throws {
+        try write(group: group, hits: hits, complete: complete)
+    }
+
+    public func hasDocument(resourceKey: String, version: String) throws -> Bool {
+        try db.withStatement("SELECT revision FROM search_versions WHERE collection = ?") { statement in
+            try db.bind([.text("document-" + resourceKey)], to: statement)
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return false }
+            try db.check(status, expected: SQLITE_ROW)
+            return String(decoding: db.data(statement, column: 0), as: UTF8.self) == version
+        }
+    }
+
+    public func replaceDocument(asset: LocalAsset, resource: Resource?, pages: [DocumentSearchPage]) throws {
+        let group = "document-" + asset.id
+        var bodies: [String: String] = [:]
+        let hits = pages.map { page -> SearchHit in
+            let id = "\(group)-\(page.index ?? 0)"
+            bodies[id] = page.text
+            var hit = SearchHit(id: id, kind: .material, title: resource?.title ?? asset.displayName,
+                                detail: resource?.path, courseId: resource?.courseId,
+                                fileExtension: SearchHit.fileExtension(of: asset.displayName), resource: resource)
+            hit.document = SearchDocumentPosition(resourceKey: asset.id, version: asset.relativePath, page: page.index)
+            return hit
+        }
+        try write(group: group, hits: hits, complete: true, bodies: bodies, version: asset.relativePath)
+    }
+
+    public func removeDocument(resourceKey: String) throws {
+        let key = "document-" + resourceKey
+        try db.transaction {
+            try db.run("DELETE FROM search_records WHERE collection = ?", [.text(key)])
+            try db.run("DELETE FROM search_versions WHERE collection = ?", [.text(key)])
+        }
+    }
+
+    private func write(group: String, hits: [SearchHit], complete: Bool, bodies: [String: String] = [:], version: String? = nil) throws {
         try db.transaction {
             let hits = SearchHit.unique(hits)
             let encoder = JSONEncoder()
@@ -30,26 +67,31 @@ public actor SearchDatabase {
                     """, [.text(group), .text(ids)])
             }
             try db.withStatement("""
-                INSERT INTO search_records(collection, hit_id, kind, course, format, title, detail, payload)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO search_records(collection, hit_id, kind, course, format, title, detail, payload, body)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(collection, hit_id) DO UPDATE SET
                     kind = excluded.kind, course = excluded.course, format = excluded.format,
-                    title = excluded.title, detail = excluded.detail, payload = excluded.payload
-                WHERE payload != excluded.payload
+                    title = excluded.title, detail = excluded.detail, payload = excluded.payload, body = excluded.body
+                WHERE payload != excluded.payload OR body IS NOT excluded.body
                 """) { statement in
                 for hit in hits {
                     try Task.checkCancellation()
-                    let detail = ([hit.detail ?? ""] + (hit.contexts ?? [])).joined(separator: " ")
+                    let body = bodies[hit.id]
+                    let detail = ([hit.detail ?? ""] + (hit.contexts ?? []) + [body ?? ""]).joined(separator: " ")
                     try db.bind([
                         .text(group), .text(hit.id), .text(hit.kind.rawValue),
                         hit.courseId.map { .integer(Int64($0)) } ?? .null,
                         hit.fileExtension.map { .text($0.lowercased()) } ?? .null,
                         .text(SearchIndex.normalize(hit.title)), .text(SearchIndex.normalize(detail)),
                         .text(String(decoding: try encoder.encode(hit), as: UTF8.self)),
+                        body.map { .text($0.replacingOccurrences(of: "\0", with: " ")) } ?? .null,
                     ], to: statement)
                     try db.check(sqlite3_step(statement), expected: SQLITE_DONE)
                     try db.check(sqlite3_reset(statement))
                 }
+            }
+            if let version {
+                try db.run("INSERT OR REPLACE INTO search_versions VALUES (?, ?)", [.text(group), .text(version)])
             }
         }
     }
@@ -97,7 +139,7 @@ public actor SearchDatabase {
         }
         bindings.append(.text(SearchIndex.normalize(input)))
         let selection = """
-            SELECT r.payload FROM \(from)
+            SELECT r.payload, r.body FROM \(from)
             WHERE \(clauses.joined(separator: " AND "))
             ORDER BY (r.title = ?) DESC, \(relevance)r.title, r.hit_id, r.collection
             """
@@ -111,7 +153,11 @@ public actor SearchDatabase {
                 let status = sqlite3_step(statement)
                 if status == SQLITE_DONE { break }
                 try db.check(status, expected: SQLITE_ROW)
-                let hit = try decoder.decode(SearchHit.self, from: db.data(statement, column: 0))
+                var hit = try decoder.decode(SearchHit.self, from: db.data(statement, column: 0))
+                if hit.document != nil {
+                    let body = String(decoding: db.data(statement, column: 1), as: UTF8.self)
+                    Self.addExcerpt(to: &hit, from: body, query: input)
+                }
                 if seen.insert(hit.id).inserted { results.append(hit) }
             }
             return results
@@ -149,6 +195,20 @@ public actor SearchDatabase {
         return terms.isEmpty ? nil : terms.prefix(24).joined(separator: " AND ")
     }
 
+    static func addExcerpt(to hit: inout SearchHit, from body: String, query: String) {
+        let phrases = query.split(separator: "\"", omittingEmptySubsequences: false).enumerated().compactMap { index, part in
+            index.isMultiple(of: 2) || part.isEmpty ? nil : String(part)
+        }
+        let words = query.split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        let found = (phrases + words).prefix(24).lazy.compactMap { word in
+            body.range(of: word, options: [.caseInsensitive, .diacriticInsensitive])
+        }.first
+        let start = found.map { body.index($0.lowerBound, offsetBy: -48, limitedBy: body.startIndex) ?? body.startIndex } ?? body.startIndex
+        let end = body.index(start, offsetBy: 160, limitedBy: body.endIndex) ?? body.endIndex
+        hit.excerpt = (start == body.startIndex ? "" : "…") + String(body[start..<end]) + (end == body.endIndex ? "" : "…")
+        if let found { hit.matchedText = String(body[found]) }
+    }
+
     private static func parameters(_ count: Int) -> String {
         Array(repeating: "?", count: count).joined(separator: ",")
     }
@@ -178,10 +238,11 @@ private final class SearchConnection {
 
     func migrate() throws {
         let version = try scalar("PRAGMA user_version")
-        guard version <= 1 else { throw SearchDatabaseError.incompatibleSchema(version) }
-        guard version == 0 else { return }
+        guard version <= 2 else { throw SearchDatabaseError.incompatibleSchema(version) }
+        guard version < 2 else { return }
         try transaction {
-            try exec("""
+            if version == 0 {
+                try exec("""
                 CREATE TABLE search_records (
                     collection TEXT NOT NULL, hit_id TEXT NOT NULL, kind TEXT NOT NULL,
                     course INTEGER, format TEXT, title TEXT NOT NULL, detail TEXT NOT NULL, payload TEXT NOT NULL,
@@ -206,7 +267,12 @@ private final class SearchConnection {
                     VALUES ('delete', old.rowid, old.title, old.detail, old.hit_id);
                     INSERT INTO search_text(rowid, title, detail, hit_id) VALUES (new.rowid, new.title, new.detail, new.hit_id);
                 END;
-                PRAGMA user_version = 1;
+                """)
+            }
+            try exec("""
+                ALTER TABLE search_records ADD COLUMN body TEXT;
+                CREATE TABLE search_versions(collection TEXT PRIMARY KEY, revision TEXT NOT NULL);
+                PRAGMA user_version = 2;
                 """)
         }
     }

@@ -36,7 +36,7 @@ struct MainView: View {
         .environment(navigation)
         .overlay {
             if navigation.isPaletteOpen {
-                CommandPalette()
+                CommandPalette(restoring: navigation.restoresSearch ? navigation.searchReturn : nil)
                     .environment(navigation)
                     .transition(.opacity)
             }
@@ -47,6 +47,12 @@ struct MainView: View {
         .motion(Motion.base, value: keepsSidebarWithFile)
         .onChange(of: model.viewerItem == nil) { _, closed in
             if closed { keepsSidebarWithFile = false }
+        }
+        .onChange(of: model.snapshots.map(ObjectIdentifier.init)) {
+            navigation.searchTarget = nil
+            navigation.searchReturn = nil
+            navigation.restoresSearch = false
+            navigation.isPaletteOpen = false
         }
         .focusedSceneValue(\.openPalette, PaletteAction { navigation.isPaletteOpen = true })
         .alert("Make lecture briefs on this Mac?", isPresented: Binding(
@@ -84,6 +90,11 @@ struct MainView: View {
             .keyboardShortcut("s", modifiers: [.control, .command])
             .accessibilityIdentifier("topbar.sidebar")
             Spacer(minLength: 0)
+            if navigation.searchReturn != nil && !navigation.isPaletteOpen {
+                IconButton(Symbol.back, label: "Back to search", symbolSize: 15) { returnToSearch() }
+                    .keyboardShortcut("[", modifiers: [.command, .option])
+                    .accessibilityIdentifier("search.return")
+            }
             // The same items in the same places with or without the sidebar.
             SearchFieldButton { navigation.isPaletteOpen = true }
             RefreshButton()
@@ -99,6 +110,17 @@ struct MainView: View {
         .padding(.leading, 84)
         .frame(height: Size.topBar)
         .background(TitleBarArea())
+    }
+
+    private func returnToSearch() {
+        guard let state = navigation.searchReturn else { return }
+        navigation.searchTarget = nil
+        navigation.courseTabs = state.courseTabs
+        navigation.expandedCourses = state.expandedCourses
+        model.selection = state.previousSelection
+        model.viewerItem = state.previousFile
+        navigation.restoresSearch = true
+        navigation.isPaletteOpen = true
     }
 
     /// The rail on the frame's wider left edge, then the sidebar on the frame, then one

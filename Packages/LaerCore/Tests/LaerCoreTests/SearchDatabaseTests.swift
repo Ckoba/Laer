@@ -51,4 +51,39 @@ import Testing
         #expect(try await db.search("lineær OR regression*", scope: .everywhere, activeCourseIds: []).isEmpty)
         #expect(try await db.count() == 3)
     }
+
+    @Test func savedDocumentVersionsReplaceTheirTextAndRetainPagePositions() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try await SnapshotStore(rootDirectory: root, accountKey: "a").searchDatabase()
+        var asset = LocalAsset(id: "LearningToolElement-7", relativePath: "original.pdf", displayName: "Notes.pdf",
+                               byteCount: 1, contentType: "application/pdf", downloadedAt: .distantPast)
+        try await db.replaceDocument(asset: asset, resource: nil, pages: [
+            DocumentSearchPage(index: 3, text: "Læs om lineær regression i dette afsnit.")
+        ])
+        let hits = try await db.search("lineær regression", scope: .everywhere, activeCourseIds: [])
+        #expect(hits.first?.document == SearchDocumentPosition(resourceKey: asset.id, version: "original.pdf", page: 3))
+        #expect(hits.first?.excerpt?.contains("Læs om lineær regression") == true)
+        #expect(try await db.hasDocument(resourceKey: asset.id, version: "original.pdf"))
+
+        asset.relativePath = "updated.pdf"
+        try await db.replaceDocument(asset: asset, resource: nil, pages: [DocumentSearchPage(index: 0, text: "Korrelation")])
+        #expect(try await db.search("regression", scope: .everywhere, activeCourseIds: []).isEmpty)
+        #expect(try await db.search("korrelation", scope: .everywhere, activeCourseIds: []).first?.document?.page == 0)
+        try await db.removeDocument(resourceKey: asset.id)
+        #expect(try await db.count() == 0)
+        #expect(!(try await db.hasDocument(resourceKey: asset.id, version: "updated.pdf")))
+    }
+
+    @Test func readsPlainTextAndReportsUnsupportedFiles() throws {
+        let root = temporaryRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let text = root.appendingPathComponent("notes.txt")
+        try Data("Æble, øvelse og årstal 2026".utf8).write(to: text)
+        #expect(try DocumentSearchText.extract(from: text) == .readable([
+            DocumentSearchPage(index: nil, text: "Æble, øvelse og årstal 2026")
+        ], partial: false))
+        #expect(try DocumentSearchText.extract(from: root.appendingPathComponent("notes.docx")) == .unsupported)
+    }
 }
