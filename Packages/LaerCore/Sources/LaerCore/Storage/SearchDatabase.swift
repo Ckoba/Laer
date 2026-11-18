@@ -33,18 +33,47 @@ public actor SearchDatabase {
     }
 
     public func replaceDocument(asset: LocalAsset, resource: Resource?, pages: [DocumentSearchPage]) throws {
-        let group = "document-" + asset.id
+        try writeDocument(asset: asset, resource: resource, pages: pages, ocr: nil)
+    }
+
+    /// Zero starts a new scan, and nil means this download revision has finished.
+    public func nextOCRPage(resourceKey: String, version: String) throws -> Int? {
+        try db.withStatement("SELECT next_page FROM search_ocr WHERE collection = ? AND revision = ?") { statement in
+            try db.bind([.text("ocr-" + resourceKey), .text(version)], to: statement)
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return 0 }
+            try db.check(status, expected: SQLITE_ROW)
+            return sqlite3_column_type(statement, 0) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(statement, 0))
+        }
+    }
+
+    /// A retried or stale scan cannot move the existing checkpoint backwards.
+    public func appendOCRBatch(_ batch: DocumentOCRBatch, asset: LocalAsset, resource: Resource?) throws {
+        guard try hasDocument(resourceKey: asset.id, version: asset.relativePath),
+              try nextOCRPage(resourceKey: asset.id, version: asset.relativePath) == batch.startPage else { return }
+        try writeDocument(asset: asset, resource: resource, pages: batch.pages, ocr: batch)
+    }
+
+    private struct DocumentWrite {
+        let asset: LocalAsset
+        let ocr: DocumentOCRBatch?
+    }
+
+    private func writeDocument(asset: LocalAsset, resource: Resource?, pages: [DocumentSearchPage], ocr: DocumentOCRBatch?) throws {
+        let group = (ocr == nil ? "document-" : "ocr-") + asset.id
         var bodies: [String: String] = [:]
         let hits = pages.map { page -> SearchHit in
-            let id = "\(group)-\(page.index ?? 0)"
+            let id = "document-\(asset.id)-\(page.index ?? 0)"
             bodies[id] = page.text
             var hit = SearchHit(id: id, kind: .material, title: resource?.title ?? asset.displayName,
                                 detail: resource?.path, courseId: resource?.courseId,
                                 fileExtension: SearchHit.fileExtension(of: asset.displayName), resource: resource)
-            hit.document = SearchDocumentPosition(resourceKey: asset.id, version: asset.relativePath, page: page.index)
+            hit.document = SearchDocumentPosition(resourceKey: asset.id, version: asset.relativePath,
+                                                  page: page.index, recognizedText: ocr == nil ? nil : true)
             return hit
         }
-        try write(group: group, hits: hits, complete: true, bodies: bodies, version: asset.relativePath)
+        try write(group: group, hits: hits, complete: ocr == nil || ocr?.startPage == 0,
+                  bodies: bodies, document: DocumentWrite(asset: asset, ocr: ocr))
     }
 
     public func removeDocument(resourceKey: String) throws {
@@ -52,6 +81,8 @@ public actor SearchDatabase {
         try db.transaction {
             try db.run("DELETE FROM search_records WHERE collection = ?", [.text(key)])
             try db.run("DELETE FROM search_versions WHERE collection = ?", [.text(key)])
+            try db.run("DELETE FROM search_records WHERE collection = ?", [.text("ocr-" + resourceKey)])
+            try db.run("DELETE FROM search_ocr WHERE collection = ?", [.text("ocr-" + resourceKey)])
         }
     }
 
@@ -61,11 +92,12 @@ public actor SearchDatabase {
         let removed = "course IS NOT NULL AND course NOT IN (SELECT value FROM json_each(?))"
         try db.transaction {
             try db.run("DELETE FROM search_versions WHERE collection IN (SELECT collection FROM search_records WHERE \(removed))", [.text(encoded)])
+            try db.run("DELETE FROM search_ocr WHERE collection IN (SELECT collection FROM search_records WHERE \(removed))", [.text(encoded)])
             try db.run("DELETE FROM search_records WHERE \(removed)", [.text(encoded)])
         }
     }
 
-    private func write(group: String, hits: [SearchHit], complete: Bool, bodies: [String: String] = [:], version: String? = nil) throws {
+    private func write(group: String, hits: [SearchHit], complete: Bool, bodies: [String: String] = [:], document: DocumentWrite? = nil) throws {
         try db.transaction {
             var hits = SearchHit.unique(hits)
             let encoder = JSONEncoder()
@@ -76,7 +108,7 @@ public actor SearchDatabase {
                     DELETE FROM search_records WHERE collection = ?
                     AND hit_id NOT IN (SELECT value FROM json_each(?))
                     """, [.text(group), .text(ids)])
-            } else if !hits.isEmpty {
+            } else if !hits.isEmpty, document == nil {
                 let retained = try db.withStatement("""
                     SELECT payload FROM search_records WHERE collection = ?
                     AND hit_id IN (SELECT value FROM json_each(?))
@@ -117,8 +149,18 @@ public actor SearchDatabase {
                     try db.check(sqlite3_reset(statement))
                 }
             }
-            if let version {
-                try db.run("INSERT OR REPLACE INTO search_versions VALUES (?, ?)", [.text(group), .text(version)])
+            if let document {
+                let version = document.asset.relativePath
+                if let ocr = document.ocr {
+                    try Task.checkCancellation()
+                    try db.run("INSERT OR REPLACE INTO search_ocr VALUES (?, ?, ?)",
+                               [.text(group), .text(version), ocr.nextPage.map { .integer(Int64($0)) } ?? .null])
+                } else {
+                    try db.run("INSERT OR REPLACE INTO search_versions VALUES (?, ?)", [.text(group), .text(version)])
+                    let obsolete = [.text("ocr-" + document.asset.id), .text(version)] as [SearchBinding]
+                    try db.run("DELETE FROM search_records WHERE collection IN (SELECT collection FROM search_ocr WHERE collection = ? AND revision != ?)", obsolete)
+                    try db.run("DELETE FROM search_ocr WHERE collection = ? AND revision != ?", obsolete)
+                }
             }
         }
     }
@@ -280,8 +322,8 @@ private final class SearchConnection {
 
     func migrate() throws {
         let version = try scalar("PRAGMA user_version")
-        guard version <= 3 else { throw SearchDatabaseError.incompatibleSchema(version) }
-        guard version < 3 else { return }
+        guard version <= 4 else { throw SearchDatabaseError.incompatibleSchema(version) }
+        guard version < 4 else { return }
         try transaction {
             if version == 0 {
                 try exec("""
@@ -317,7 +359,8 @@ private final class SearchConnection {
                     CREATE TABLE search_versions(collection TEXT PRIMARY KEY, revision TEXT NOT NULL);
                     """)
             }
-            try exec("CREATE INDEX search_records_title ON search_records(title); PRAGMA user_version = 3;")
+            if version < 3 { try exec("CREATE INDEX search_records_title ON search_records(title);") }
+            try exec("CREATE TABLE search_ocr(collection TEXT PRIMARY KEY, revision TEXT NOT NULL, next_page INTEGER); PRAGMA user_version = 4;")
         }
     }
 

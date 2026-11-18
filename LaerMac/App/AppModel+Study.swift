@@ -121,7 +121,7 @@ extension AppModel {
                 let url = await downloads.fileURL(for: asset)
                 guard downloads === self.downloads, savedAssets[asset.id] == asset else { return }
                 viewerItem = ViewerItem(id: asset.id, title: hit.title, fileURL: url, startPage: document.page,
-                                        searchMatch: hit.matchedText)
+                                        searchMatch: document.recognizedText == true ? nil : hit.matchedText)
                 if let resource = hit.resource { noteRecent(resource) }
             }
             return
@@ -217,8 +217,11 @@ extension AppModel {
     func rebuildSearchIndex() async {
         guard let store = snapshots, !isIndexing else { return }
         searchDocumentWorker?.cancel()
+        searchOCRBatch?.cancel()
         searchDocumentWorker = nil
         searchDocumentQueue = [:]
+        searchOCRBatch = nil
+        searchOCRIsRunning = false
         searchIndex = nil
         searchIndexedAt = nil
         searchCoverageIncomplete = true
@@ -494,6 +497,18 @@ extension AppModel {
         }
     }
 
+    static let searchOCRPreference = "LaerSearchOCR"
+
+    func updateSearchOCR() {
+        if UserDefaults.standard.bool(forKey: Self.searchOCRPreference) {
+            for asset in savedAssets.values where (asset.relativePath as NSString).pathExtension.lowercased() == "pdf" {
+                queueDocumentSearch(asset, resource: nil)
+            }
+        } else {
+            searchOCRBatch?.cancel()
+        }
+    }
+
     func queueDocumentSearch(_ asset: LocalAsset, resource: Resource?) {
         let format = (asset.relativePath as NSString).pathExtension.lowercased()
         guard DocumentSearchText.formats.contains(format), let index = searchIndex, let downloads else { return }
@@ -506,27 +521,78 @@ extension AppModel {
             while !Task.isCancelled, index === searchIndex, downloads === self.downloads,
                   let key = searchDocumentQueue.keys.first, let work = searchDocumentQueue.removeValue(forKey: key) {
                 do {
-                    if try await index.hasDocument(resourceKey: key, version: work.asset.relativePath) { continue }
-                    let url = await downloads.fileURL(for: work.asset)
-                    let extraction = Task.detached(priority: .utility) { try DocumentSearchText.extract(from: url) }
-                    let result = try await withTaskCancellationHandler {
-                        try await extraction.value
-                    } onCancel: {
-                        extraction.cancel()
-                    }
-                    guard !Task.isCancelled, index === searchIndex, downloads === self.downloads,
-                          savedAssets[key] == work.asset else { continue }
-                    if let courseId = work.resource?.courseId, coursesState.lastSuccess != nil, !coursesState.isIncomplete,
-                       !courses.contains(where: { $0.courseId == courseId }) { continue }
-                    let pages: [DocumentSearchPage]
-                    if case .readable(let extracted, _) = result { pages = extracted } else { pages = [] }
-                    try await index.replaceDocument(asset: work.asset, resource: work.resource, pages: pages)
-                    if index === searchIndex { searchRevision += 1 }
+                    try await indexSavedDocument(work, index: index, downloads: downloads)
                 } catch is CancellationError {
-                    break
+                    if Task.isCancelled { break }
                 } catch {
                     if index === searchIndex { searchIndexFailed = true }
                 }
+            }
+        }
+    }
+
+    private func isCurrentSearchDocument(_ work: SearchDocumentWork, index: SearchDatabase, downloads: DownloadStore) -> Bool {
+        guard !Task.isCancelled, index === searchIndex, downloads === self.downloads,
+              savedAssets[work.asset.id] == work.asset else { return false }
+        if let courseId = work.resource?.courseId, coursesState.lastSuccess != nil, !coursesState.isIncomplete {
+            return courses.contains(where: { $0.courseId == courseId })
+        }
+        return true
+    }
+
+    private func indexSavedDocument(_ work: SearchDocumentWork, index: SearchDatabase, downloads: DownloadStore) async throws {
+        let asset = work.asset
+        let url = await downloads.fileURL(for: asset)
+        guard isCurrentSearchDocument(work, index: index, downloads: downloads) else { return }
+        let hasEmbeddedIndex = try await index.hasDocument(resourceKey: asset.id, version: asset.relativePath)
+        if !hasEmbeddedIndex {
+            let extraction = Task.detached(priority: .utility) { try DocumentSearchText.extract(from: url) }
+            let result = try await withTaskCancellationHandler {
+                try await extraction.value
+            } onCancel: {
+                extraction.cancel()
+            }
+            guard isCurrentSearchDocument(work, index: index, downloads: downloads) else { return }
+            let pages: [DocumentSearchPage]
+            if case .readable(let extracted, _) = result { pages = extracted } else { pages = [] }
+            try await index.replaceDocument(asset: asset, resource: work.resource, pages: pages)
+            if index === searchIndex { searchRevision += 1 }
+        }
+        guard url.pathExtension.lowercased() == "pdf", UserDefaults.standard.bool(forKey: Self.searchOCRPreference),
+              let next = try await index.nextOCRPage(resourceKey: asset.id, version: asset.relativePath),
+              isCurrentSearchDocument(work, index: index, downloads: downloads) else { return }
+        try await indexScannedPages(work, url: url, startingAt: next, index: index, downloads: downloads)
+    }
+
+    private func indexScannedPages(
+        _ work: SearchDocumentWork, url: URL, startingAt page: Int, index: SearchDatabase, downloads: DownloadStore
+    ) async throws {
+        guard UserDefaults.standard.bool(forKey: Self.searchOCRPreference) else { return }
+        let extraction = Task.detached(priority: .utility) { try DocumentOCR.readPDF(from: url, startPage: page) }
+        searchOCRBatch = extraction
+        searchOCRIsRunning = true
+        defer {
+            if index === searchIndex, downloads === self.downloads {
+                searchOCRBatch = nil
+                searchOCRIsRunning = false
+            }
+        }
+        let batch = try await withTaskCancellationHandler {
+            try await extraction.value
+        } onCancel: {
+            extraction.cancel()
+        }
+        guard UserDefaults.standard.bool(forKey: Self.searchOCRPreference),
+              isCurrentSearchDocument(work, index: index, downloads: downloads) else { return }
+        try await index.appendOCRBatch(batch, asset: work.asset, resource: work.resource)
+        guard isCurrentSearchDocument(work, index: index, downloads: downloads) else { return }
+        if !batch.pages.isEmpty { searchRevision += 1 }
+        if batch.nextPage != nil {
+            // Yield between batches. Metadata searches and other saved documents get time on the executor.
+            try await Task.sleep(for: .milliseconds(250))
+            if isCurrentSearchDocument(work, index: index, downloads: downloads),
+               UserDefaults.standard.bool(forKey: Self.searchOCRPreference), searchDocumentQueue[work.asset.id] == nil {
+                searchDocumentQueue[work.asset.id] = work
             }
         }
     }

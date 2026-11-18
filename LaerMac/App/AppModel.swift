@@ -94,6 +94,8 @@ final class AppModel {
     var searchRevision = 0
     @ObservationIgnored var searchDocumentWorker: Task<Void, Never>?
     @ObservationIgnored var searchDocumentQueue: [String: SearchDocumentWork] = [:]
+    @ObservationIgnored var searchOCRBatch: Task<DocumentOCRBatch, Error>?
+    var searchOCRIsRunning = false
     var searchIndexedAt: Date?
     var isIndexing = false
     private(set) var courses: [Course] = []
@@ -529,8 +531,11 @@ final class AppModel {
         searchRevision = 0
         isIndexing = false
         searchDocumentWorker?.cancel()
+        searchOCRBatch?.cancel()
         searchDocumentWorker = nil
         searchDocumentQueue = [:]
+        searchOCRBatch = nil
+        searchOCRIsRunning = false
         snapshots = nil
         downloads = nil
         briefs.close()

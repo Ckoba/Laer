@@ -13,7 +13,8 @@ public struct DocumentSearchPage: Sendable, Equatable {
 
 public enum DocumentSearchText {
     public static let formats: Set<String> = ["pdf", "txt", "md", "markdown"]
-    private static let maxFileSize = 24 * 1024 * 1024
+    static let maxFileSize = 24 * 1024 * 1024
+    static let maxPDFPages = 400
     private static let maxTextSize = 400_000
 
     public enum Result: Sendable, Equatable {
@@ -35,7 +36,7 @@ public enum DocumentSearchText {
             guard !document.isLocked else { return .encrypted }
             var pages: [DocumentSearchPage] = []
             var remaining = maxTextSize
-            let pageLimit = min(document.pageCount, 400)
+            let pageLimit = min(document.pageCount, maxPDFPages)
             var partial = pageLimit < document.pageCount
             for index in 0..<pageLimit {
                 try Task.checkCancellation()

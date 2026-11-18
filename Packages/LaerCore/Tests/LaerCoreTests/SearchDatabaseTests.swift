@@ -116,4 +116,33 @@ import Testing
         #expect(try await reopened.count() == 0)
         #expect(await snapshots.load(SearchHit.self, collection: "course-source")?.records == records)
     }
+
+    @Test func ocrCheckpointSurvivesReopeningAndOldRevisionsCannotOverwriteIt() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let index = try await SnapshotStore(rootDirectory: root, accountKey: "a").searchDatabase()
+        var asset = LocalAsset(id: "file-1", relativePath: "v1.pdf", displayName: "Scan.pdf",
+                               byteCount: 1, contentType: "application/pdf", downloadedAt: .distantPast)
+        try await index.replaceDocument(asset: asset, resource: nil, pages: [DocumentSearchPage(index: 0, text: "Embedded textbook")])
+        let first = DocumentOCRBatch(startPage: 0, pages: [DocumentSearchPage(index: 1, text: "Field observations")], nextPage: 2)
+        try await index.appendOCRBatch(first, asset: asset, resource: nil)
+
+        let reopened = try await SnapshotStore(rootDirectory: root, accountKey: "a").searchDatabase()
+        #expect(try await reopened.nextOCRPage(resourceKey: asset.id, version: asset.relativePath) == 2)
+        try await reopened.appendOCRBatch(DocumentOCRBatch(startPage: 2, pages: [], nextPage: nil), asset: asset, resource: nil)
+        #expect(try await reopened.nextOCRPage(resourceKey: asset.id, version: asset.relativePath) == nil)
+        try await reopened.appendOCRBatch(first, asset: asset, resource: nil)
+        #expect(try await reopened.nextOCRPage(resourceKey: asset.id, version: asset.relativePath) == nil)
+        let hits = try await reopened.search("field observations", scope: .everywhere, activeCourseIds: [])
+        #expect(hits.first?.document?.page == 1)
+        #expect(hits.first?.document?.recognizedText == true)
+        #expect(try await reopened.search("embedded textbook", scope: .everywhere, activeCourseIds: []).first?.document?.page == 0)
+
+        let original = asset
+        asset.relativePath = "v2.pdf"
+        try await reopened.replaceDocument(asset: asset, resource: nil, pages: [])
+        try await reopened.appendOCRBatch(first, asset: original, resource: nil)
+        #expect(try await reopened.nextOCRPage(resourceKey: asset.id, version: asset.relativePath) == 0)
+        #expect(try await reopened.search("field observations", scope: .everywhere, activeCourseIds: []).isEmpty)
+    }
 }

@@ -84,11 +84,13 @@ public struct SearchDocumentPosition: Codable, Sendable, Hashable {
     public let resourceKey: String
     public let version: String
     public let page: Int?
+    public let recognizedText: Bool?
 
-    public init(resourceKey: String, version: String, page: Int?) {
+    public init(resourceKey: String, version: String, page: Int?, recognizedText: Bool? = nil) {
         self.resourceKey = resourceKey
         self.version = version
         self.page = page
+        self.recognizedText = recognizedText
     }
 }
 
