@@ -29,7 +29,7 @@ import Testing
         let other = SearchHit(id: "material-second", kind: .material, title: "Notes.pdf", courseId: 12)
         try await db.update(group: "plans", hits: [first, second, other], complete: true)
         try await db.update(group: "folder", hits: [SearchHit(resource: resource, courseId: 12, context: "Archive")], complete: true)
-        try await db.update(group: "plans", hits: [], complete: false)
+        try await db.update(group: "plans", hits: [first], complete: false)
 
         let hits = try await db.search("notes", scope: .activeCourses, activeCourseIds: [12])
         #expect(hits.count == 2)
@@ -85,5 +85,35 @@ import Testing
             DocumentSearchPage(index: nil, text: "Æble, øvelse og årstal 2026")
         ], partial: false))
         #expect(try DocumentSearchText.extract(from: root.appendingPathComponent("notes.docx")) == .unsupported)
+    }
+
+    @Test func completeCourseListRemovesOnlyEntriesWithRevokedCourseAccess() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try await SnapshotStore(rootDirectory: root, accountKey: "a").searchDatabase()
+        try await db.update(group: "mixed", hits: [
+            SearchHit(id: "revoked", kind: .plan, title: "Notes", courseId: 1),
+            SearchHit(id: "allowed", kind: .plan, title: "Notes", courseId: 2),
+            SearchHit(id: "personal", kind: .message, title: "Notes"),
+        ], complete: true)
+        try await db.retainCourses([2])
+        let results = try await db.search("notes", scope: .everywhere, activeCourseIds: [])
+        #expect(Set(results.map(\.id)) == ["allowed", "personal"])
+    }
+
+    @Test func rebuildingClosesTheOldIndexAndKeepsSourceSnapshots() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snapshots = SnapshotStore(rootDirectory: root, accountKey: "a")
+        let index = try await snapshots.searchDatabase()
+        let records = [SearchHit(id: "saved", kind: .course, title: "Cached course")]
+        try await snapshots.save(records, collection: "course-source", coverage: .complete, checkpoint: nil, at: .now)
+        try await index.update(group: "courses", hits: records, complete: true)
+        try await snapshots.removeSearchIndex(courseIds: [])
+
+        await #expect(throws: SearchDatabaseError.unavailable) { try await index.count() }
+        let reopened = try await snapshots.searchDatabase()
+        #expect(try await reopened.count() == 0)
+        #expect(await snapshots.load(SearchHit.self, collection: "course-source")?.records == records)
     }
 }

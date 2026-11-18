@@ -12,6 +12,7 @@ struct SearchReturnState {
     var localHits: [SearchHit]
     var onlineHits: [SearchHit]
     var onlineSummary: OnlineSearchSummary?
+    var expandedDocuments: Set<String>
     var previousSelection: AppModel.Selection?
     var previousFile: ViewerItem?
     var courseTabs: [Int: CourseTab]

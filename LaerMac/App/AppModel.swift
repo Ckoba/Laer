@@ -680,6 +680,7 @@ final class AppModel {
             try? await snapshots?.save(result.items, collection: "courses", coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
             coursesState = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
             await indexSearchGroup("courses", hits: result.items.map(Self.courseSearchHit), complete: result.isComplete, store: store)
+            if result.isComplete { await retainSearchCourses(Set(result.items.map(\.courseId)), store: store) }
         } catch is CancellationError {
             coursesState.phase = .idle
         } catch RefreshError.staleGeneration {

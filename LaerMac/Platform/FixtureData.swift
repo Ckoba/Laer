@@ -20,6 +20,9 @@ struct FixtureTransport: ReadTransport {
         if isSignedOut() {
             return ReadResponse(status: 200, contentType: "text/html", body: Data("<html><form></form></html>".utf8))
         }
+        if request.routeTemplate == "courses/{id}/resources/search/v1" {
+            try await Task.sleep(for: .milliseconds(900))
+        }
         guard let body = Self.body(for: request) else {
             let status = request.routeTemplate == "assignments/{id}/v1" ? 403 : 404
             return ReadResponse(status: status, contentType: "application/json", body: Data("{}".utf8))
@@ -56,6 +59,16 @@ struct FixtureTransport: ReadTransport {
              "LearningObjectId": 9001, "LearningObjectInstanceId": 9101},
             {"ElementId": 703, "ElementType": "LearningToolElement", "Title": "Course page", "Url": "/page/703"}
             """#, count: 3))}
+            """#
+        case "courses/{id}/resources/search/v1":
+            guard request.path.contains("/11/"),
+                  request.query.contains(where: { $0.name == "searchText" && $0.value?.lowercased() == "syllabus" })
+            else { return #"{"Resources": \#(page("", count: 0))}"# }
+            return #"""
+            {"Resources": \#(page(#"""
+            {"ElementId":702,"ElementType":"LearningToolElement","Title":"Syllabus.pdf","CourseId":11,"LearningObjectId":9001},
+            {"ElementId":799,"ElementType":"LearningToolElement","Title":"Fieldwork syllabus.pdf","CourseId":11,"LearningObjectId":9003}
+            """#, count: 2))}
             """#
         case "courses/{id}/folders/{id}/resources/v1":
             return #"""

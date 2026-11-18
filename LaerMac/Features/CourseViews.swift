@@ -300,10 +300,10 @@ struct PlansView: View {
             if case .plan(let courseId, let planId) = navigation.searchTarget?.destination, courseId == course.courseId {
                 Button("All plans", systemImage: Symbol.back) { navigation.searchTarget = nil }
                     .padding(.bottom, Space.s8)
+                    .accessibilityIdentifier("search.plan.back")
                 if let plan = items.first(where: { $0.planId == planId }) {
                     PlanRow(plan: plan, courseId: courseId, note: model.lectureNote(for: plan, course: course), isExpanded: true)
                         .id(planId)
-                        .accessibilityIdentifier("search.plan.\(planId)")
                 } else {
                     EmptyState(state: state, empty: "This plan is unavailable")
                 }
@@ -564,6 +564,7 @@ private struct PlanRow: View {
                 }
             }
             .environment(\.rowDividerHidden, isExpanded)
+            .accessibilityIdentifier("plan.row.\(plan.planId)")
             .accessibilityAddTraits(isExpanded ? .isSelected : [])
             if isExpanded {
                 VStack(alignment: .leading, spacing: Space.s2) {

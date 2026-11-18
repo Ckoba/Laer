@@ -140,7 +140,7 @@ extension AppModel {
             } else if let course = hit.courseId {
                 selection = .course(course)
             }
-        case .course, .plan:
+        case .course, .plan, .announcement:
             if let course = hit.courseId { selection = .course(course) }
         case .task:
             selection = .upcoming
@@ -268,6 +268,19 @@ extension AppModel {
                 complete = false
             }
             if !(await indexFolders(in: course, store: store)) { complete = false }
+            if ParityGate.bulletins {
+                do {
+                    let result = try await fetch(key: "bulletins-\(id)") { try await $0.bulletins(courseId: id) }
+                    await indexBulletins(result.items, courseId: id, store: store)
+                    if result.isComplete {
+                        try await store.save(result.items, collection: "bulletins-\(id)", coverage: .recentWindow, checkpoint: nil, at: Date())
+                    } else {
+                        complete = false
+                    }
+                } catch {
+                    complete = false
+                }
+            }
         }
 
         guard !Task.isCancelled, store === snapshots else { return }
@@ -433,6 +446,18 @@ extension AppModel {
         await indexSearchGroup("events", hits: hits, complete: false, store: store)
     }
 
+    func indexBulletins(_ bulletins: [Bulletin], courseId: Int, store: SnapshotStore?) async {
+        let hits = bulletins.map { bulletin -> SearchHit in
+            let text = PlainText.from(bulletin.text ?? "")
+            let title = String(text.prefix(100))
+            let detail = [bulletin.publishedBy?.fullName, text].compactMap { $0 }.joined(separator: " · ")
+            return SearchHit(id: "announcement-\(courseId)-\(bulletin.bulletinId)", kind: .announcement,
+                             title: title.isEmpty ? "Announcement" : title, detail: detail, courseId: courseId,
+                             date: bulletin.published, destination: .announcement(courseId: courseId, bulletinId: bulletin.bulletinId))
+        }
+        await indexSearchGroup("bulletins-\(courseId)", hits: hits, complete: false, store: store)
+    }
+
     static func courseSearchHit(_ course: Course) -> SearchHit {
         SearchHit(id: "course-\(course.courseId)", kind: .course, title: course.shortTitle,
                   detail: course.title, courseId: course.courseId, url: course.url)
@@ -445,11 +470,25 @@ extension AppModel {
 
     func indexSearchGroup(_ group: String, hits: [SearchHit], complete: Bool, store: SnapshotStore?) async {
         guard let store, store === snapshots, let index = searchIndex else { return }
+        let known = Set(courses.map(\.courseId))
+        let indexed = coursesState.lastSuccess == nil || coursesState.isIncomplete ? hits : hits.filter { hit in
+            hit.courseId.map(known.contains) ?? true
+        }
         do {
-            try await index.update(group: group, hits: hits, complete: complete)
+            try await index.update(group: group, hits: indexed, complete: complete)
             if store === snapshots, index === searchIndex { searchRevision += 1 }
         } catch is CancellationError {
             return
+        } catch {
+            if store === snapshots, index === searchIndex { searchIndexFailed = true }
+        }
+    }
+
+    func retainSearchCourses(_ ids: Set<Int>, store: SnapshotStore?) async {
+        guard let store, store === snapshots, let index = searchIndex else { return }
+        do {
+            try await index.retainCourses(ids)
+            if store === snapshots, index === searchIndex { searchRevision += 1 }
         } catch {
             if store === snapshots, index === searchIndex { searchIndexFailed = true }
         }
@@ -477,6 +516,8 @@ extension AppModel {
                     }
                     guard !Task.isCancelled, index === searchIndex, downloads === self.downloads,
                           savedAssets[key] == work.asset else { continue }
+                    if let courseId = work.resource?.courseId, coursesState.lastSuccess != nil, !coursesState.isIncomplete,
+                       !courses.contains(where: { $0.courseId == courseId }) { continue }
                     let pages: [DocumentSearchPage]
                     if case .readable(let extracted, _) = result { pages = extracted } else { pages = [] }
                     try await index.replaceDocument(asset: work.asset, resource: work.resource, pages: pages)

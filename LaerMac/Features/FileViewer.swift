@@ -667,7 +667,18 @@ private struct PDFPanel: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("viewer.pdf")
-        .accessibilityValue("Page \(controller.pageIndex + 1) of \(controller.pageCount)")
+        .overlay(alignment: .bottomLeading) {
+            if startPage != nil, controller.pageCount > 0 {
+                Text("Page \(controller.pageIndex + 1) of \(controller.pageCount)")
+                    .font(Type.t11)
+                    .padding(.horizontal, Space.s8)
+                    .padding(.vertical, Space.s4)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(Space.s12)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("viewer.pdf.page")
+            }
+        }
         .background(Color.chrome)
         .background {
             GeometryReader { proxy in

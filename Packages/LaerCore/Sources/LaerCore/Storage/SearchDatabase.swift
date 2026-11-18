@@ -4,6 +4,7 @@ import SQLite3
 public enum SearchDatabaseError: Error, Equatable, Sendable {
     case sqlite(Int32)
     case incompatibleSchema(Int64)
+    case unavailable
 }
 
 /// One account's metadata index. Source collections refresh in independent transactions.
@@ -54,17 +55,43 @@ public actor SearchDatabase {
         }
     }
 
+    /// A complete, authenticated course listing can invalidate entries for a formerly visible course.
+    public func retainCourses(_ courseIds: Set<Int>) throws {
+        let encoded = String(decoding: try JSONEncoder().encode(courseIds), as: UTF8.self)
+        let removed = "course IS NOT NULL AND course NOT IN (SELECT value FROM json_each(?))"
+        try db.transaction {
+            try db.run("DELETE FROM search_versions WHERE collection IN (SELECT collection FROM search_records WHERE \(removed))", [.text(encoded)])
+            try db.run("DELETE FROM search_records WHERE \(removed)", [.text(encoded)])
+        }
+    }
+
     private func write(group: String, hits: [SearchHit], complete: Bool, bodies: [String: String] = [:], version: String? = nil) throws {
         try db.transaction {
-            let hits = SearchHit.unique(hits)
+            var hits = SearchHit.unique(hits)
             let encoder = JSONEncoder()
             encoder.outputFormatting = .sortedKeys
+            let ids = String(decoding: try encoder.encode(hits.map(\.id)), as: UTF8.self)
             if complete {
-                let ids = String(decoding: try encoder.encode(hits.map(\.id)), as: UTF8.self)
                 try db.run("""
                     DELETE FROM search_records WHERE collection = ?
                     AND hit_id NOT IN (SELECT value FROM json_each(?))
                     """, [.text(group), .text(ids)])
+            } else if !hits.isEmpty {
+                let retained = try db.withStatement("""
+                    SELECT payload FROM search_records WHERE collection = ?
+                    AND hit_id IN (SELECT value FROM json_each(?))
+                    """) { statement in
+                    try db.bind([.text(group), .text(ids)], to: statement)
+                    let decoder = JSONDecoder()
+                    var previous: [SearchHit] = []
+                    while true {
+                        let status = sqlite3_step(statement)
+                        if status == SQLITE_DONE { return previous }
+                        try db.check(status, expected: SQLITE_ROW)
+                        previous.append(try decoder.decode(SearchHit.self, from: db.data(statement, column: 0)))
+                    }
+                }
+                hits = SearchHit.unique(hits + retained)
             }
             try db.withStatement("""
                 INSERT INTO search_records(collection, hit_id, kind, course, format, title, detail, payload, body)
@@ -184,6 +211,8 @@ public actor SearchDatabase {
         Int(try db.scalar("SELECT COUNT(DISTINCT hit_id) FROM search_records"))
     }
 
+    func close() throws { try db.close() }
+
     static func ftsQuery(_ text: String) -> String? {
         let terms = text.split(separator: "\"", omittingEmptySubsequences: false).enumerated().flatMap { index, part in
             let folded = SearchIndex.normalize(String(part))
@@ -222,7 +251,7 @@ private enum SearchBinding {
 
 /// Owned exclusively by the index actor once initialized.
 private final class SearchConnection {
-    private let handle: OpaquePointer
+    private var handle: OpaquePointer?
 
     init(url: URL) throws {
         var database: OpaquePointer?
@@ -235,6 +264,12 @@ private final class SearchConnection {
     }
 
     deinit { sqlite3_close(handle) }
+
+    func close() throws {
+        guard let handle else { return }
+        try check(sqlite3_close(handle))
+        self.handle = nil
+    }
 
     func migrate() throws {
         let version = try scalar("PRAGMA user_version")
@@ -278,6 +313,7 @@ private final class SearchConnection {
     }
 
     func withStatement<T>(_ query: String, _ work: (OpaquePointer) throws -> T) throws -> T {
+        guard let handle else { throw SearchDatabaseError.unavailable }
         var statement: OpaquePointer?
         try check(sqlite3_prepare_v2(handle, query, -1, &statement, nil))
         guard let statement else { throw SearchDatabaseError.sqlite(SQLITE_ERROR) }
@@ -332,6 +368,7 @@ private final class SearchConnection {
     }
 
     private func exec(_ query: String) throws {
+        guard let handle else { throw SearchDatabaseError.unavailable }
         try check(sqlite3_exec(handle, query, nil, nil, nil))
     }
 }

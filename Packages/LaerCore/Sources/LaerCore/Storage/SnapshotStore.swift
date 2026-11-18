@@ -26,6 +26,7 @@ public actor SnapshotStore {
     private let accountKey: String
     private let directory: URL
     private var index: SearchDatabase?
+    private var clearingIndex = false
 
     public init(rootDirectory: URL, accountKey: String) {
         self.accountKey = accountKey
@@ -34,6 +35,7 @@ public actor SnapshotStore {
     }
 
     public func searchDatabase() throws -> SearchDatabase {
+        guard !clearingIndex else { throw SearchDatabaseError.unavailable }
         if let index { return index }
         let opened = try SearchDatabase(url: directory.appendingPathComponent("search.sqlite"))
         index = opened
@@ -41,9 +43,14 @@ public actor SnapshotStore {
     }
 
     /// Clears the derived search index and its crawl markers. Source snapshots remain readable.
-    public func removeSearchIndex(courseIds: [Int]) throws {
+    public func removeSearchIndex(courseIds: [Int]) async throws {
+        guard !clearingIndex else { throw SearchDatabaseError.unavailable }
+        clearingIndex = true
+        defer { clearingIndex = false }
+        try await index?.close()
         index = nil
-        let paths = [directory.appendingPathComponent("search.sqlite"), fileURL(for: "search-coverage")]
+        let databaseFiles = ["search.sqlite", "search.sqlite-journal", "search.sqlite-wal", "search.sqlite-shm"]
+        let paths = databaseFiles.map { directory.appendingPathComponent($0) } + [fileURL(for: "search-coverage")]
             + courseIds.map { fileURL(for: "search-folders-\($0)") }
         for url in paths where FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
@@ -75,7 +82,11 @@ public actor SnapshotStore {
     }
 
     /// Deletes every cached collection for this account. Downloads live elsewhere and are kept.
-    public func removeAllMetadata() throws {
+    public func removeAllMetadata() async throws {
+        guard !clearingIndex else { throw SearchDatabaseError.unavailable }
+        clearingIndex = true
+        defer { clearingIndex = false }
+        try await index?.close()
         index = nil
         guard FileManager.default.fileExists(atPath: directory.path) else { return }
         try FileManager.default.removeItem(at: directory)

@@ -1,7 +1,7 @@
 import Foundation
 
 public enum SearchKind: String, Codable, Sendable, Hashable, CaseIterable {
-    case course, plan, material, task, message, event
+    case course, plan, material, task, message, event, announcement
 }
 
 public enum SearchScope: Sendable, Hashable {
@@ -98,6 +98,7 @@ public enum SearchDestination: Codable, Sendable, Hashable {
     case task(Int)
     case thread(Int)
     case event(Int)
+    case announcement(courseId: Int, bulletinId: Int)
 }
 
 /// An in-memory index with accent- and case-insensitive word matching. Records replace by group,
@@ -189,7 +190,7 @@ public struct SearchIndex: Sendable {
         case .plan: total += 2
         case .course: total += 2
         case .task: total += 1
-        case .event, .message: break
+        case .event, .message, .announcement: break
         }
         return total
     }

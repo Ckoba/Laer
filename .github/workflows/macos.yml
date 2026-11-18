@@ -20,6 +20,13 @@ jobs:
           persist-credentials: false
       - run: xcodebuild -version
       - run: swift test --package-path Packages/LaerCore
+      - name: Measure local search on synthetic data
+        env:
+          LAER_SEARCH_BENCHMARK: "1"
+        run: |
+          sw_vers
+          sysctl hw.model hw.memsize
+          swift test --package-path Packages/LaerCore --filter measuresMetadataAndDocumentQueries
 
   app-tests:
     name: Laer build and UI tests

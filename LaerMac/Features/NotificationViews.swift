@@ -144,11 +144,14 @@ private struct NotificationRow: View {
 /// A course's bulletins, used for the Updates tab once the bulletins route passes.
 struct BulletinsView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
+    private let courseId: Int
     @State private var loader: CollectionLoader<Bulletin>
     @State private var openComments: Set<Int> = []
 
     init(course: Course) {
         let courseId = course.courseId
+        self.courseId = courseId
         _loader = State(initialValue: CollectionLoader(key: "bulletins-\(courseId)", coverage: .recentWindow) { client in
             try await client.bulletins(courseId: courseId)
         })
@@ -157,21 +160,41 @@ struct BulletinsView: View {
     var body: some View {
         PageScroll(spacing: 0, lazy: true) {
             FreshnessLine(state: loader.state)
-            if loader.records.isEmpty {
+            if case .announcement(let course, let id) = navigation.searchTarget?.destination, course == courseId {
+                Button("All announcements", systemImage: Symbol.back) { navigation.searchTarget = nil }
+                    .padding(.bottom, Space.s8)
+                if let bulletin = loader.records.first(where: { $0.bulletinId == id }) {
+                    bulletinRow(bulletin, isLast: true, expanded: true).id(id)
+                } else {
+                    EmptyState(state: loader.state, empty: "This announcement is unavailable")
+                }
+            } else if loader.records.isEmpty {
                 EmptyState(state: loader.state, empty: "No recent updates")
-            }
-            ForEach(sorted) { bulletin in
-                BulletinRow(bulletin: bulletin, isLast: bulletin.bulletinId == sorted.last?.bulletinId, showsComments: Binding(
-                    get: { openComments.contains(bulletin.bulletinId) },
-                    set: { if $0 { openComments.insert(bulletin.bulletinId) } else { openComments.remove(bulletin.bulletinId) } }
-                ))
-                // Row fills reach into the gutter so the text starts at the page title's x.
-                .padding(.horizontal, -Space.s8)
+            } else {
+                ForEach(sorted) { bulletin in
+                    bulletinRow(bulletin, isLast: bulletin.bulletinId == sorted.last?.bulletinId, expanded: false)
+                }
             }
         }
         .dividedRows()
-        .task { await loader.load(using: model) }
-        .focusedSceneValue(\.refreshCurrent, RefreshAction { await loader.refresh(using: model) })
+        .task {
+            let store = model.snapshots
+            await loader.load(using: model)
+            await model.indexBulletins(loader.records, courseId: courseId, store: store)
+        }
+        .focusedSceneValue(\.refreshCurrent, RefreshAction {
+            let store = model.snapshots
+            await loader.refresh(using: model)
+            await model.indexBulletins(loader.records, courseId: courseId, store: store)
+        })
+    }
+
+    private func bulletinRow(_ bulletin: Bulletin, isLast: Bool, expanded: Bool) -> some View {
+        BulletinRow(bulletin: bulletin, isLast: isLast, showsComments: Binding(
+            get: { openComments.contains(bulletin.bulletinId) },
+            set: { if $0 { openComments.insert(bulletin.bulletinId) } else { openComments.remove(bulletin.bulletinId) } }
+        ), isExpanded: expanded)
+        .padding(.horizontal, -Space.s8)
     }
 
     /// Pinned first, then newest first.
@@ -189,7 +212,7 @@ private struct BulletinRow: View {
     let bulletin: Bulletin
     let isLast: Bool
     @Binding var showsComments: Bool
-    @State private var isExpanded = false
+    @State var isExpanded = false
 
     private var preview: String { RichTextCache.plainText(bulletin.text ?? "") }
 

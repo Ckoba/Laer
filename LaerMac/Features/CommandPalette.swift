@@ -15,6 +15,8 @@ struct CommandPalette: View {
     @State private var highlighted: String?
     @State private var visibleCount = 60
     @State private var onlineSummary: OnlineSearchSummary?
+    @State private var expandedDocuments: Set<String> = []
+    @State private var showsPreview = false
     @State private var searchingOnline = false
     @State private var hasSearched = false
     @State private var contentHeight: CGFloat = 0
@@ -33,6 +35,7 @@ struct CommandPalette: View {
         _localHits = State(initialValue: state.localHits)
         _onlineHits = State(initialValue: state.onlineHits)
         _onlineSummary = State(initialValue: state.onlineSummary)
+        _expandedDocuments = State(initialValue: state.expandedDocuments)
         _hasSearched = State(initialValue: true)
         _keepsRestoredOnline = State(initialValue: state.onlineSummary != nil || !state.onlineHits.isEmpty)
     }
@@ -90,7 +93,15 @@ struct CommandPalette: View {
     }
 
     private var allHits: [SearchHit] { SearchHit.unique(localHits + onlineHits) }
-    private var hits: [SearchHit] { Array(allHits.prefix(visibleCount)) }
+    private var hits: [SearchHit] { shownHits(Array(allHits.prefix(visibleCount))) }
+
+    private func shownHits(_ page: [SearchHit]) -> [SearchHit] {
+        var seen = Set<String>()
+        return page.filter { hit in
+            guard let key = hit.document?.resourceKey else { return true }
+            return expandedDocuments.contains(key) || seen.insert(key).inserted
+        }
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -113,6 +124,9 @@ struct CommandPalette: View {
                     HStack {
                         Text(hits.count == 1 ? "1 result" : contentHeight > Self.maxResultsHeight ? "\(hits.count) results, scroll for more" : "\(hits.count) results")
                         Spacer(minLength: Space.s8)
+                        Button("Preview") { showsPreview = true }
+                            .buttonStyle(.plain)
+                            .popover(isPresented: $showsPreview) { preview }
                         Text("↑↓ Select · ↩ Open · esc Close")
                     }
                     .font(Type.t11)
@@ -152,6 +166,8 @@ struct CommandPalette: View {
             onlineSummary = nil
             hasSearched = false
             visibleCount = 60
+            expandedDocuments = []
+            showsPreview = false
         }
         .task(id: LocalQuery(query: query, limit: visibleCount, revision: model.searchRevision)) {
             await runLocalSearch()
@@ -256,7 +272,9 @@ struct CommandPalette: View {
 
     @ViewBuilder private var results: some View {
         let matches = allHits
-        let visible = Array(matches.prefix(visibleCount))
+        let page = Array(matches.prefix(visibleCount))
+        let visible = shownHits(page)
+        let documents = Dictionary(grouping: page.compactMap { hit in hit.document.map { ($0.resourceKey, hit.id) } }, by: \.0)
         let selectedID = visible.first(where: { $0.id == highlighted })?.id ?? visible.first?.id
         ScrollViewReader { proxy in
             ScrollView {
@@ -288,9 +306,24 @@ struct CommandPalette: View {
                         }
                         .id(hit.id)
                         .onHover { if $0 { highlighted = hit.id } }
+                        if let key = hit.document?.resourceKey, let pages = documents[key], pages.count > 1,
+                           pages.first?.1 == hit.id {
+                            Button(expandedDocuments.contains(key) ? "Hide other matches" : "Show \(pages.count) matches in this document") {
+                                if expandedDocuments.contains(key) { expandedDocuments.remove(key) }
+                                else { expandedDocuments.insert(key) }
+                            }
+                            .buttonStyle(.plain)
+                            .font(Type.t11)
+                            .foregroundStyle(Color.accent)
+                            .padding(.leading, Size.icon + Space.s12)
+                            .padding(.bottom, Space.s4)
+                        }
                     }
                     if matches.count > visibleCount, visibleCount < 500 {
                         Button("Show more results") { visibleCount = min(visibleCount + 60, 500) }
+                            .padding(Space.s8)
+                    } else if matches.count > visibleCount {
+                        EmptyLine("Showing the first 500 matches. Narrow the search to see different matches.")
                             .padding(Space.s8)
                     }
                 }
@@ -303,6 +336,24 @@ struct CommandPalette: View {
             .frame(idealHeight: resultsHeight, maxHeight: resultsHeight)
             .scrollIndicators(.visible)
             .onChange(of: highlighted) { _, id in if let id { proxy.scrollTo(id) } }
+        }
+    }
+
+    @ViewBuilder private var preview: some View {
+        if let hit = selectedHit {
+            VStack(alignment: .leading, spacing: Space.s8) {
+                Text(hit.title).font(Type.t13.weight(.semibold))
+                if let subtitle = subtitle(for: hit) { Text(subtitle).foregroundStyle(Color.textMuted) }
+                if let excerpt = hit.excerpt { Text(verbatim: excerpt).textSelection(.enabled) }
+                if let contexts = hit.contexts, contexts.count > 1 {
+                    Text("Locations").font(Type.t11.weight(.semibold))
+                    ForEach(contexts, id: \.self) { Text(verbatim: $0) }
+                }
+                Button("Open result") { showsPreview = false; open(hit) }
+            }
+            .font(Type.t12)
+            .frame(width: 320, alignment: .leading)
+            .padding(Space.s12)
         }
     }
 
@@ -403,6 +454,7 @@ struct CommandPalette: View {
         navigation.searchReturn = SearchReturnState(
             text: text, scope: scope, kind: kind, fileType: fileType, selectedID: hit.id,
             visibleCount: visibleCount, localHits: localHits, onlineHits: onlineHits, onlineSummary: onlineSummary,
+            expandedDocuments: expandedDocuments,
             previousSelection: model.selection, previousFile: model.viewerItem,
             courseTabs: navigation.courseTabs, expandedCourses: navigation.expandedCourses
         )
@@ -410,6 +462,7 @@ struct CommandPalette: View {
         navigation.searchTarget = hit
         if let course = hit.courseId {
             if hit.kind == .plan { navigation.courseTabs[course] = .plans }
+            if hit.kind == .announcement { navigation.courseTabs[course] = .updates }
             if hit.resource?.isFolder == true { navigation.courseTabs[course] = .materials }
         }
         model.open(hit)
@@ -473,6 +526,7 @@ struct CommandPalette: View {
         case .task: "Tasks"
         case .message: "Messages"
         case .event: "Events"
+        case .announcement: "Announcements"
         }
     }
 
@@ -484,6 +538,7 @@ struct CommandPalette: View {
         case .task: Symbol.task
         case .message: Symbol.message
         case .event: Symbol.lecture
+        case .announcement: Symbol.update
         }
     }
 }

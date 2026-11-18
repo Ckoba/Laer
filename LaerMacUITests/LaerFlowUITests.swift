@@ -307,8 +307,27 @@ final class LaerFlowUITests: XCTestCase {
         field.typeText("introduction and reading")
         let result = app.descendants(matching: .any)["search.result.plan-11-601"].firstMatch
         open(result, "A plan found by its description")
-        XCTAssertTrue(app.descendants(matching: .any)["search.plan.601"].firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["search.plan.back"].firstMatch.waitForExistence(timeout: 10), "Search did not open a single plan")
+        XCTAssertTrue(app.buttons["plan.row.601"].firstMatch.exists, "Search did not open plan 601")
         XCTAssertTrue(element(app, containing: "Syllabus.pdf").exists, "The exact plan is expanded to its materials")
+    }
+
+    func testOnlineResultsAppendWithoutReplacingTheSelectedLocalHit() {
+        let app = launch(["-LaerSearchOnline", "YES"])
+        openCourseOne(app)
+        open(tab(app, "Files"), "The local course materials")
+        XCTAssertTrue(element(app, containing: "Syllabus.pdf").waitForExistence(timeout: 10))
+        app.typeKey("k", modifierFlags: .command)
+        let field = app.textFields["Search"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("Syllabus")
+        let local = app.descendants(matching: .any)["search.result.material-11-learningtoolelement-702"]
+        let online = app.descendants(matching: .any)["search.result.material-11-learningtoolelement-799"].firstMatch
+        XCTAssertTrue(local.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(online.waitForExistence(timeout: 10))
+        XCTAssertEqual(local.count, 1, "The online match for a local file is joined by stable ID")
+        field.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(app.buttons["Close Syllabus.pdf"].firstMatch.waitForExistence(timeout: 10))
     }
 
     func testPaletteOpensThePageFoundInsideASavedPDF() {
@@ -324,8 +343,9 @@ final class LaerFlowUITests: XCTestCase {
         field.typeText("silted up")
         let result = app.descendants(matching: .any)["search.result.document-LearningToolElement-702-1"].firstMatch
         open(result, "Text from page two of the saved PDF")
-        let pdf = app.descendants(matching: .any)["viewer.pdf"].firstMatch
-        XCTAssertTrue(waitUntil(timeout: 15) { pdf.exists && pdf.value as? String == "Page 2 of 3" })
+        let page = app.staticTexts["viewer.pdf.page"].firstMatch
+        XCTAssertTrue(waitUntil(timeout: 15) { page.exists && page.label == "Page 2 of 3" },
+                      page.exists ? "The PDF reader shows \(page.label)" : "The PDF reader has no page indicator")
         open(app.buttons["search.return"].firstMatch, "Back to the results")
         XCTAssertEqual(app.textFields["Search"].firstMatch.value as? String, "silted up")
         XCTAssertTrue(result.exists)
