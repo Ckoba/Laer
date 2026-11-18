@@ -104,6 +104,18 @@ extension ReadResponse {
         #expect(!result.items[0].isFolder)
     }
 
+    @Test func courseSearchUsesTheDocumentedQueryAndReportsTruncation() async throws {
+        let client = ItslearningClient(transport: FixtureTransport { request in
+            #expect(request.path == "/restapi/personal/courses/17/resources/search/v1")
+            #expect(request.query.map(\.name) == ["locationType", "searchText"])
+            #expect(request.query.map(\.value) == ["1", "CO2 & øvelse"])
+            return .json(#"{"Resources":{"EntityArray":[{"Title":"Notes","ElementId":5,"ElementType":"Folder"}],"Total":2,"CurrentPageIndex":0,"PageSize":1}}"#)
+        })
+        let result = try await client.searchResources(courseId: 17, text: "CO2 & øvelse")
+        #expect(result.items.map(\.elementId) == [5])
+        #expect(!result.isComplete)
+    }
+
     @Test func missingDeadlineStaysMissing() async throws {
         let client = ItslearningClient(transport: FixtureTransport { _ in
             .json(#"{"EntityArray":[{"TaskId":1,"Title":"A","Deadline":null,"LocationId":7},{"TaskId":2,"Title":"B","Deadline":"2030-01-02T03:04:05Z"}],"Total":2,"CurrentPageIndex":0,"PageSize":100}"#)

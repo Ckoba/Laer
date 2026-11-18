@@ -76,6 +76,18 @@ public struct ItslearningClient: Sendable {
         )
     }
 
+    /// The course search route accepts a single course and does not document paging parameters.
+    public func searchResources(courseId: Int, text: String) async throws -> PagedResult<Resource> {
+        let response: ResourceEnvelope = try await get(ReadRequest(
+            path: "/restapi/personal/courses/\(courseId)/resources/search/v1",
+            query: [URLQueryItem(name: "locationType", value: "1"), URLQueryItem(name: "searchText", value: text)],
+            routeTemplate: "courses/{id}/resources/search/v1"
+        ))
+        let page = response.resources
+        let complete = page.total.map { page.items.count >= $0 } ?? false
+        return PagedResult(items: page.items, isComplete: complete && (page.pageIndex ?? 0) == 0)
+    }
+
     public func tasks() async throws -> PagedResult<StudyTask> {
         try await allPages(path: "/restapi/personal/tasks/v1", routeTemplate: "tasks/v1")
     }
@@ -152,13 +164,14 @@ public struct ItslearningClient: Sendable {
         }
     }
 
+    private struct ResourceEnvelope: Decodable, Sendable {
+        let resources: Page<Resource>
+        enum CodingKeys: String, CodingKey { case resources = "Resources" }
+    }
+
     func allResourcePages(path: String, routeTemplate: String) async throws -> PagedResult<Resource> {
-        struct Envelope: Decodable, Sendable {
-            let resources: Page<Resource>
-            enum CodingKeys: String, CodingKey { case resources = "Resources" }
-        }
         return try await collect { index in
-            let envelope: Envelope = try await get(ReadRequest(
+            let envelope: ResourceEnvelope = try await get(ReadRequest(
                 path: path, query: pageQuery(index: index, size: Self.maxPageSize), routeTemplate: routeTemplate
             ))
             return envelope.resources
@@ -169,12 +182,16 @@ public struct ItslearningClient: Sendable {
     func collect<Element>(fetch: (Int) async throws -> Page<Element>) async throws -> PagedResult<Element> {
         var items: [Element] = []
         for index in 0..<Self.pageLimit {
+            try Task.checkCancellation()
             let page = try await fetch(index)
-            items.append(contentsOf: page.items)
-            if let total = page.total, items.count >= total {
-                return PagedResult(items: items, isComplete: true)
+            if let reportedIndex = page.pageIndex, reportedIndex != index {
+                return PagedResult(items: items, isComplete: false)
             }
-            if page.items.isEmpty || page.items.count < (page.pageSize ?? Self.maxPageSize) {
+            items.append(contentsOf: page.items)
+            if let total = page.total {
+                if items.count >= total { return PagedResult(items: items, isComplete: true) }
+                if page.items.isEmpty { return PagedResult(items: items, isComplete: false) }
+            } else if page.items.isEmpty || page.items.count < (page.pageSize ?? Self.maxPageSize) {
                 return PagedResult(items: items, isComplete: true)
             }
         }

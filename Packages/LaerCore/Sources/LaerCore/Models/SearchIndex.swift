@@ -20,8 +20,10 @@ public struct SearchHit: Codable, Sendable, Hashable, Identifiable {
     public var resource: Resource?
     public var date: Date?
     public var url: String?
+    public var contexts: [String]?
+    public var destination: SearchDestination?
 
-    public init(id: String, kind: SearchKind, title: String, detail: String? = nil, courseId: Int? = nil, fileExtension: String? = nil, resource: Resource? = nil, date: Date? = nil, url: String? = nil) {
+    public init(id: String, kind: SearchKind, title: String, detail: String? = nil, courseId: Int? = nil, fileExtension: String? = nil, resource: Resource? = nil, date: Date? = nil, url: String? = nil, contexts: [String]? = nil, destination: SearchDestination? = nil) {
         self.id = id
         self.kind = kind
         self.title = title
@@ -31,6 +33,40 @@ public struct SearchHit: Codable, Sendable, Hashable, Identifiable {
         self.resource = resource
         self.date = date
         self.url = url
+        self.contexts = contexts
+        self.destination = destination
+    }
+
+    public init(resource: Resource, courseId: Int, context: String?, destination: SearchDestination? = nil) {
+        self.init(
+            id: "material-\(courseId)-\(resource.id.lowercased())", kind: .material, title: resource.title,
+            detail: context, courseId: courseId, resource: resource, url: resource.url ?? resource.contentUrl,
+            contexts: context.map { [$0] }, destination: destination
+        )
+    }
+
+    /// Keeps the input's rank order and retains the contexts of duplicate objects.
+    public static func unique(_ hits: [Self]) -> [Self] {
+        var positions: [String: Int] = [:]
+        var result: [Self] = []
+        for hit in hits {
+            guard let position = positions[hit.id] else {
+                positions[hit.id] = result.count
+                result.append(hit)
+                continue
+            }
+            var first = result[position]
+            let contexts = Set((first.contexts ?? []) + (hit.contexts ?? []))
+            if !contexts.isEmpty { first.contexts = contexts.sorted() }
+            if first.resource?.learningObjectId == nil, first.resource?.contentUrl == nil,
+               let resource = hit.resource, resource.learningObjectId != nil || resource.contentUrl != nil {
+                first.resource = resource
+            }
+            first.destination = first.destination ?? hit.destination
+            first.url = first.url ?? hit.url
+            result[position] = first
+        }
+        return result
     }
 
     /// A short trailing extension in a title, such as "Slides week 3.PPTX".
@@ -39,6 +75,14 @@ public struct SearchHit: Codable, Sendable, Hashable, Identifiable {
         let value = title[range].dropFirst().lowercased()
         return value.allSatisfy(\.isNumber) ? nil : value
     }
+}
+
+public enum SearchDestination: Codable, Sendable, Hashable {
+    case plan(courseId: Int, planId: Int)
+    case folder(courseId: Int, folderId: Int, title: String)
+    case task(Int)
+    case thread(Int)
+    case event(Int)
 }
 
 /// An in-memory index with accent- and case-insensitive word matching. Records replace by group,
@@ -65,6 +109,11 @@ public struct SearchIndex: Sendable {
 
     public mutating func replace(group: String, with hits: [SearchHit]) {
         groups[group] = hits.map { Entry(hit: $0, title: Self.normalize($0.title), detail: Self.normalize($0.detail ?? "")) }
+    }
+
+    public mutating func update(group: String, with hits: [SearchHit], complete: Bool) {
+        let previous: [SearchHit] = complete ? [] : (groups[group] ?? []).map(\.hit)
+        replace(group: group, with: SearchHit.unique(hits + previous))
     }
 
     public func search(
@@ -95,17 +144,17 @@ public struct SearchIndex: Sendable {
                 }
             }
         }
-        return scored
-            .sorted { lhs, rhs in
+        let ranked = scored.sorted { lhs, rhs in
                 if lhs.score != rhs.score { return lhs.score > rhs.score }
-                return lhs.hit.title.localizedStandardCompare(rhs.hit.title) == .orderedAscending
+                let title = lhs.hit.title.localizedStandardCompare(rhs.hit.title)
+                if title != .orderedSame { return title == .orderedAscending }
+                return lhs.hit.id < rhs.hit.id
             }
-            .prefix(limit)
-            .map(\.hit)
+        return Array(SearchHit.unique(ranked.map(\.hit)).prefix(max(0, limit)))
     }
 
     private static func score(_ entry: Entry, words: [String]) -> Int? {
-        var total = 0
+        var total = entry.title == words.joined(separator: " ") ? 1000 : 0
         for word in words {
             if entry.title.hasPrefix(word) {
                 total += 100
@@ -135,6 +184,7 @@ public struct SearchIndex: Sendable {
             .replacingOccurrences(of: "ø", with: "o")
             .replacingOccurrences(of: "æ", with: "ae")
             .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: nil)
-            .replacingOccurrences(of: #"[_\-\.,/]+"#, with: " ", options: .regularExpression)
+            .split { !$0.isLetter && !$0.isNumber }
+            .joined(separator: " ")
     }
 }

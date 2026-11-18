@@ -25,11 +25,19 @@ public actor SnapshotStore {
 
     private let accountKey: String
     private let directory: URL
+    private var index: SearchDatabase?
 
     public init(rootDirectory: URL, accountKey: String) {
         self.accountKey = accountKey
         self.directory = AccountDirectory.url(root: rootDirectory, accountKey: accountKey)
             .appendingPathComponent("Snapshots", isDirectory: true)
+    }
+
+    public func searchDatabase() throws -> SearchDatabase {
+        if let index { return index }
+        let opened = try SearchDatabase(url: directory.appendingPathComponent("search.sqlite"))
+        index = opened
+        return opened
     }
 
     /// Replaces the collection atomically. If encoding or writing fails, the previous snapshot,
@@ -58,6 +66,7 @@ public actor SnapshotStore {
 
     /// Deletes every cached collection for this account. Downloads live elsewhere and are kept.
     public func removeAllMetadata() throws {
+        index = nil
         guard FileManager.default.fileExists(atPath: directory.path) else { return }
         try FileManager.default.removeItem(at: directory)
     }
