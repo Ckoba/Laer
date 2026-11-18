@@ -5,6 +5,7 @@ import SwiftUI
 /// Folder-by-folder browsing. A listing covers its folder, not the whole course.
 struct MaterialsView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     let course: Course
     @State private var path: [Resource] = []
     @State private var reading: Resource?
@@ -13,10 +14,18 @@ struct MaterialsView: View {
     private var key: String { AppModel.folderKey(courseId: course.courseId, folderId: folderId) }
 
     var body: some View {
-        if let reading {
-            PageReaderView(resource: reading) { self.reading = nil }
-        } else {
-            list
+        Group {
+            if let reading {
+                PageReaderView(resource: reading) { self.reading = nil }
+            } else {
+                list
+            }
+        }
+        .task(id: navigation.searchTarget?.id) {
+            guard case .folder(let id, _, _) = navigation.searchTarget?.destination,
+                  id == course.courseId, let folder = navigation.searchTarget?.resource else { return }
+            reading = nil
+            path = [folder]
         }
     }
 

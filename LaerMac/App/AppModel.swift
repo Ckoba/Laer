@@ -88,7 +88,16 @@ final class AppModel {
     var recentFiles: [RecentFile] = []
     var recentFilesPersonId: Int?
     var starredIds: Set<Int> = []
-    var searchIndex = SearchIndex()
+    var searchIndex: SearchDatabase?
+    var searchIndexFailed = false
+    var searchCoverageIncomplete = true
+    var searchRevision = 0
+    @ObservationIgnored var searchDocumentWorker: Task<Void, Never>?
+    @ObservationIgnored var searchDocumentQueue: [String: SearchDocumentWork] = [:]
+    @ObservationIgnored var searchOCRBatch: Task<DocumentOCRBatch, Error>?
+    var searchOCRIsRunning = false
+    var searchOCRIsClearing = false
+    var searchOCRPowerPaused = ProcessInfo.processInfo.isLowPowerModeEnabled
     var searchIndexedAt: Date?
     var isIndexing = false
     private(set) var courses: [Course] = []
@@ -517,8 +526,19 @@ final class AppModel {
         recentFiles = []
         recentFilesPersonId = nil
         starredIds = []
-        searchIndex = SearchIndex()
+        searchIndex = nil
         searchIndexedAt = nil
+        searchIndexFailed = false
+        searchCoverageIncomplete = true
+        searchRevision = 0
+        isIndexing = false
+        searchDocumentWorker?.cancel()
+        searchOCRBatch?.cancel()
+        searchDocumentWorker = nil
+        searchDocumentQueue = [:]
+        searchOCRBatch = nil
+        searchOCRIsRunning = false
+        searchOCRIsClearing = false
         snapshots = nil
         downloads = nil
         briefs.close()
@@ -529,8 +549,6 @@ final class AppModel {
             ?? FileManager.default.temporaryDirectory
         return support.appending(path: "Laer", directoryHint: .isDirectory)
     }
-
-    func indexingClient() -> ItslearningClient? { makeClient() }
 
     private func makeClient() -> ItslearningClient? {
         #if DEBUG
@@ -573,7 +591,7 @@ final class AppModel {
         if let snapshot = await snapshots.load(StoredId.self, collection: "starred") {
             starredIds = Set(snapshot.records.map(\.value))
         }
-        Task(priority: .utility) { await loadSearchIndex() }
+        await loadSearchIndex()
     }
 
     func refreshAll() async {
@@ -661,6 +679,7 @@ final class AppModel {
     }
 
     func refreshCourses() async {
+        let store = snapshots
         coursesState.phase = .loading
         do {
             let result = try await fetch(key: "courses") { try await $0.allCourses() }
@@ -668,6 +687,8 @@ final class AppModel {
             courses = result.items
             try? await snapshots?.save(result.items, collection: "courses", coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
             coursesState = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
+            await indexSearchGroup("courses", hits: result.items.map(Self.courseSearchHit), complete: result.isComplete, store: store)
+            if result.isComplete { await retainSearchCourses(Set(result.items.map(\.courseId)), store: store) }
         } catch is CancellationError {
             coursesState.phase = .idle
         } catch RefreshError.staleGeneration {
@@ -678,6 +699,7 @@ final class AppModel {
     }
 
     func refreshTasks() async {
+        let store = snapshots
         tasksState.phase = .loading
         do {
             let result = try await fetch(key: "tasks") { try await $0.tasks() }
@@ -685,6 +707,7 @@ final class AppModel {
             tasks = result.items
             try? await snapshots?.save(result.items, collection: "tasks", coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
             tasksState = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
+            await indexSearchGroup("tasks", hits: result.items.map(Self.taskSearchHit), complete: result.isComplete, store: store)
         } catch RefreshError.staleGeneration {
             tasksState.phase = .idle
         } catch {
@@ -738,6 +761,7 @@ final class AppModel {
     }
 
     func loadPlans(courseId: Int) async {
+        let store = snapshots
         Perf.mark("plans requested")
         defer { Perf.mark("plans ready") }
         if plans[courseId] == nil,
@@ -753,6 +777,7 @@ final class AppModel {
             plans[courseId] = result.items
             try? await snapshots?.save(result.items, collection: "plans-\(courseId)", coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
             plansState[courseId] = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
+            await indexPlans(result, courseId: courseId, store: store)
         } catch RefreshError.staleGeneration {
             plansState[courseId, default: CollectionState()].phase = .idle
         } catch {
@@ -809,6 +834,7 @@ final class AppModel {
     }
 
     func refreshFolder(courseId: Int, folderId: Int?) async {
+        let store = snapshots
         let key = Self.folderKey(courseId: courseId, folderId: folderId)
         resourcesState[key, default: CollectionState()].phase = .loading
         do {
@@ -823,6 +849,7 @@ final class AppModel {
             resources[key] = result.items
             try? await snapshots?.save(result.items, collection: key, coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
             resourcesState[key] = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
+            await indexFolder(result, courseId: courseId, folderId: folderId, context: nil, store: store)
         } catch RefreshError.staleGeneration {
             resourcesState[key, default: CollectionState()].phase = .idle
         } catch {
@@ -856,17 +883,22 @@ final class AppModel {
                 contentType: staged.contentType,
                 at: Date()
             )
+            guard !Task.isCancelled, downloads === self.downloads else { return }
             savedAssets[resource.id] = asset
             downloadStates[resource.id] = .idle
             // A newer copy makes any earlier slide conversion stale.
             SlideConverter.removeCached(for: resource.id)
             convertedFiles[resource.id] = nil
+            queueDocumentSearch(asset, resource: resource)
             scheduleBrief(forReading: resource)
         } catch DownloadError.notADocument {
+            guard downloads === self.downloads else { return }
             downloadStates[resource.id] = .failed("This item only opens on the website.")
         } catch FileAcquirerError.websiteOnly {
+            guard downloads === self.downloads else { return }
             downloadStates[resource.id] = .failed("This item only opens on the website.")
         } catch {
+            guard downloads === self.downloads else { return }
             downloadStates[resource.id] = .failed("The download failed.")
         }
     }
@@ -877,8 +909,19 @@ final class AppModel {
 
     /// Deletes a saved file. Only ever called from an explicit user action.
     func removeSavedFile(_ resource: Resource) async {
-        try? await downloads?.remove(resourceKey: resource.id)
+        guard let downloads else { return }
+        let index = searchIndex
+        do { try await downloads.remove(resourceKey: resource.id) } catch { return }
+        guard downloads === self.downloads else { return }
         savedAssets[resource.id] = nil
+        searchDocumentQueue[resource.id] = nil
+        do {
+            try await index?.removeDocument(resourceKey: resource.id)
+            if index === searchIndex { searchRevision += 1 }
+        } catch {
+            if index === searchIndex { searchIndexFailed = true }
+        }
+        guard downloads === self.downloads else { return }
         SlideConverter.removeCached(for: resource.id)
         convertedFiles[resource.id] = nil
         // Its tab would otherwise show a file that no longer exists.
@@ -914,14 +957,19 @@ final class AppModel {
         }
         let staged = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         do {
-            try FixtureFiles.pdf(title: resource.title).write(to: staged)
-            savedAssets[resource.id] = try await downloads.commit(
+            let scannedPage = UserDefaults.standard.bool(forKey: "LaerFixtureScannedPDF") ? 2 : nil
+            try FixtureFiles.pdf(title: resource.title, scannedPage: scannedPage).write(to: staged)
+            let asset = try await downloads.commit(
                 stagedFile: staged, resourceKey: resource.id, suggestedName: "\(resource.title).pdf",
                 contentType: "application/pdf", at: Date()
             )
+            guard downloads === self.downloads else { return }
+            savedAssets[resource.id] = asset
             downloadStates[resource.id] = .idle
+            queueDocumentSearch(asset, resource: resource)
             scheduleBrief(forReading: resource)
         } catch {
+            guard downloads === self.downloads else { return }
             downloadStates[resource.id] = .failed("The download failed.")
         }
     }

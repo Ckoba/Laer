@@ -374,7 +374,7 @@ private struct FileContent: View {
             if item.isNewTab {
                 NewTabPage()
             } else if let displayURL, displayURL.pathExtension.lowercased() == "pdf" {
-                PDFPanel(url: displayURL, fileId: item.id, startPage: item.startPage, isCurrent: isCurrent)
+                PDFPanel(url: displayURL, fileId: item.id, startPage: item.startPage, searchMatch: item.searchMatch, isCurrent: isCurrent)
                     .id(displayURL)
             } else if let displayURL {
                 QuickLookContent(url: displayURL)
@@ -583,6 +583,18 @@ private final class PDFController {
         view.go(to: page)
     }
 
+    func showSearchMatch(_ text: String?, onPage index: Int) {
+        go(toPage: index)
+        view.highlightedSelections = nil
+        guard let text, !text.isEmpty, let page = view.document?.page(at: index), let contents = page.string else { return }
+        let range = (contents as NSString).range(of: text)
+        guard range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= page.numberOfCharacters,
+              let selection = page.selection(for: range) else { return }
+        selection.color = .systemYellow
+        view.highlightedSelections = [selection]
+        view.go(to: selection)
+    }
+
     private func updatePage() {
         guard let page = view.currentPage, let document = view.document else { return }
         pageIndex = document.index(for: page)
@@ -596,6 +608,7 @@ private final class MonitorHolder {
 private struct PDFPanel: View {
     let url: URL
     let startPage: Int?
+    let searchMatch: String?
     let isCurrent: Bool
     @State private var controller: PDFController
     @AppStorage("viewerPagesLocked") private var isLocked = false
@@ -612,9 +625,10 @@ private struct PDFPanel: View {
     private let closedRegion: CGFloat = 26
     private let openRegion: CGFloat = 184
 
-    init(url: URL, fileId: String, startPage: Int?, isCurrent: Bool) {
+    init(url: URL, fileId: String, startPage: Int?, searchMatch: String?, isCurrent: Bool) {
         self.url = url
         self.startPage = startPage
+        self.searchMatch = searchMatch
         self.isCurrent = isCurrent
         _controller = State(initialValue: PDFController(url: url, fileId: fileId))
     }
@@ -651,6 +665,21 @@ private struct PDFPanel: View {
                 pagesPanel.padding(Space.s8)
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("viewer.pdf")
+        .overlay(alignment: .bottomLeading) {
+            if startPage != nil, controller.pageCount > 0 {
+                Text("Page \(controller.pageIndex + 1) of \(controller.pageCount)")
+                    .font(Type.t11)
+                    .padding(.horizontal, Space.s8)
+                    .padding(.vertical, Space.s4)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(Space.s12)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("viewer.pdf.page")
+                    .accessibilityLabel("Page \(controller.pageIndex + 1) of \(controller.pageCount)")
+            }
+        }
         .background(Color.chrome)
         .background {
             GeometryReader { proxy in
@@ -662,9 +691,10 @@ private struct PDFPanel: View {
         .task {
             await controller.load(url)
             // Always land on a page, so the top gutter is the same whether or not a page was asked for.
-            controller.go(toPage: startPage ?? 0)
+            controller.showSearchMatch(searchMatch, onPage: startPage ?? 0)
         }
-        .onChange(of: startPage) { _, page in controller.go(toPage: page) }
+        .onChange(of: startPage) { _, page in controller.showSearchMatch(searchMatch, onPage: page ?? 0) }
+        .onChange(of: searchMatch) { _, match in controller.showSearchMatch(match, onPage: startPage ?? 0) }
         // Expanding or restoring resizes the page; keep the same page in view.
         .onChange(of: model.viewerIsFull) {
             guard isCurrent else { return }

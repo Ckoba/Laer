@@ -1,0 +1,82 @@
+name: macOS
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests:
+    name: LaerCore tests
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: xcodebuild -version
+      - name: Run core tests
+        run: swift test --package-path Packages/LaerCore --skip DocumentOCRTests
+      - name: Run native PDF and image recognition tests
+        run: swift test --package-path Packages/LaerCore --filter DocumentOCRTests --no-parallel
+      - name: Measure local search on synthetic data
+        env:
+          LAER_SEARCH_BENCHMARK: "1"
+        run: |
+          sw_vers
+          sysctl hw.model hw.memsize
+          swift test --package-path Packages/LaerCore --filter measuresMetadataAndDocumentQueries
+
+  app-tests:
+    name: Laer build and UI tests
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: xcodebuild -version
+      - name: Build app and UI tests
+        run: |
+          xcodebuild -project Laer.xcodeproj -scheme Laer \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/LaerBuild" \
+            -only-testing:LaerMacUITests \
+            build-for-testing
+      - name: Run search UI tests
+        run: |
+          xcodebuild -project Laer.xcodeproj -scheme Laer \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/LaerBuild" \
+            -only-testing:LaerMacUITests/LaerFlowUITests/testOnlineResultsAppendWithoutReplacingTheSelectedLocalHit \
+            -only-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensTheIndexedPlan \
+            -only-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensThePageFoundInsideASavedPDF \
+            -only-testing:LaerMacUITests/LaerFlowUITests/testPaletteFindsOCRTextAndOpensTheScannedPage \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$RUNNER_TEMP/LaerSearchUITests.xcresult" test-without-building
+      - name: Run existing UI tests
+        run: |
+          xcodebuild -project Laer.xcodeproj -scheme Laer \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/LaerBuild" \
+            -only-testing:LaerMacUITests \
+            -skip-testing:LaerMacUITests/LaerFlowUITests/testOnlineResultsAppendWithoutReplacingTheSelectedLocalHit \
+            -skip-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensTheIndexedPlan \
+            -skip-testing:LaerMacUITests/LaerFlowUITests/testPaletteOpensThePageFoundInsideASavedPDF \
+            -skip-testing:LaerMacUITests/LaerFlowUITests/testPaletteFindsOCRTextAndOpensTheScannedPage \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$RUNNER_TEMP/LaerUITests.xcresult" test-without-building
+      - name: Upload UI test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: LaerUITests-xcresult
+          path: |
+            ${{ runner.temp }}/LaerSearchUITests.xcresult
+            ${{ runner.temp }}/LaerUITests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7

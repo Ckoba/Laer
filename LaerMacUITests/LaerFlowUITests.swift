@@ -297,6 +297,91 @@ final class LaerFlowUITests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 3) { !app.textFields["Search"].exists }, "Esc did not close the palette")
     }
 
+    func testPaletteOpensTheIndexedPlan() {
+        let app = launch()
+        openCourseOne(app)
+        open(element(app, containing: "Show previous lectures"), "The indexed plan has loaded")
+        app.typeKey("k", modifierFlags: .command)
+        let field = app.textFields["Search"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("introduction and reading")
+        let result = app.descendants(matching: .any)["search.result.plan-11-601"].firstMatch
+        open(result, "A plan found by its description")
+        XCTAssertTrue(app.buttons["search.plan.back"].firstMatch.waitForExistence(timeout: 10), "Search did not open a single plan")
+        XCTAssertTrue(app.descendants(matching: .any)["search.plan.601"].firstMatch.exists, "Search did not open plan 601")
+        XCTAssertTrue(app.descendants(matching: .any)["plan.resource.702"].firstMatch.waitForExistence(timeout: 10),
+                      "The exact plan should show its materials")
+    }
+
+    func testOnlineResultsAppendWithoutReplacingTheSelectedLocalHit() {
+        let app = launch(["-LaerSearchOnline", "YES"])
+        openCourseOne(app)
+        open(tab(app, "Files"), "The local course materials")
+        XCTAssertTrue(element(app, containing: "Syllabus.pdf").waitForExistence(timeout: 10))
+        app.typeKey("k", modifierFlags: .command)
+        let field = app.textFields["Search"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("Syllabus")
+        let local = app.descendants(matching: .any).matching(identifier: "search.result.material-11-learningtoolelement-702")
+        let online = app.descendants(matching: .any)["search.result.material-11-learningtoolelement-799"].firstMatch
+        XCTAssertTrue(local.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(online.waitForExistence(timeout: 10))
+        XCTAssertEqual(local.count, 1, "The online match for a local file is joined by stable ID")
+        keepScreenshot(app, name: "Local and online search results")
+        field.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(app.buttons["Close Syllabus.pdf"].firstMatch.waitForExistence(timeout: 10))
+    }
+
+    func testPaletteOpensThePageFoundInsideASavedPDF() {
+        let app = launch(["-viewerPagesLocked", "NO"])
+        openCourseOne(app)
+        open(tab(app, "Files"), "The Files tab")
+        open(element(app, containing: "Syllabus.pdf"), "The PDF to save")
+        let close = app.buttons.matching(NSPredicate(format: "label == 'Close file' AND identifier != '_XCUI:CloseWindow'")).firstMatch
+        open(close, "The open PDF")
+        app.typeKey("k", modifierFlags: .command)
+        let field = app.textFields["Search"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("silted up")
+        let result = app.descendants(matching: .any)["search.result.document-LearningToolElement-702-1"].firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 15))
+        keepScreenshot(app, name: "PDF text search")
+        open(result, "Text from page two of the saved PDF")
+        let page = element(app, containing: "Page 2 of 3")
+        let indicator = app.staticTexts["viewer.pdf.page"].firstMatch
+        XCTAssertTrue(page.waitForExistence(timeout: 15), "The PDF reader indicator: \(indicator.debugDescription)")
+        keepScreenshot(app, name: "PDF page opened from search")
+        open(app.buttons["search.return"].firstMatch, "Back to the results")
+        XCTAssertEqual(app.textFields["Search"].firstMatch.value as? String, "silted up")
+        XCTAssertTrue(result.exists)
+    }
+
+    private func keepScreenshot(_ app: XCUIApplication, name: String) {
+        let attachment = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testPaletteFindsOCRTextAndOpensTheScannedPage() {
+        let app = launch(["-LaerSearchOCR", "YES", "-LaerFixtureScannedPDF", "YES", "-viewerPagesLocked", "NO"])
+        openCourseOne(app)
+        open(tab(app, "Files"), "The Files tab")
+        open(element(app, containing: "Syllabus.pdf"), "The scanned PDF to save")
+        let close = app.buttons.matching(NSPredicate(format: "label == 'Close file' AND identifier != '_XCUI:CloseWindow'")).firstMatch
+        open(close, "The open PDF")
+        app.typeKey("k", modifierFlags: .command)
+        let field = app.textFields["Search"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText("field observations")
+        let result = app.descendants(matching: .any)["search.result.document-LearningToolElement-702-1"].firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 20), "Vision text from the image-only page did not become searchable")
+        XCTAssertTrue(element(app, containing: "OCR · may contain errors").exists, "OCR results should be marked")
+        keepScreenshot(app, name: "OCR match for an image-only PDF page")
+        open(result, "Text recognized on page two")
+        XCTAssertTrue(element(app, containing: "Page 2 of 3").waitForExistence(timeout: 15))
+    }
+
     func testWeekCalendarMovesByWeek() throws {
         let app = launch()
         open(rail(app, "calendar"), "Calendar in the rail")

@@ -113,6 +113,7 @@ struct CourseCalendarView: View {
 /// The signed-in person's calendar as a week grid, one block per event.
 struct PersonalCalendarView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     @State private var weekStart = Self.defaultWeek()
     @State private var weekMemo = Memo<WeekKey, [ScheduleDay]>()
     @State private var events: [CalendarEvent] = []
@@ -139,9 +140,25 @@ struct PersonalCalendarView: View {
             .padding(.leading, Space.page)
             .padding(.trailing, Space.page)
             .padding(.top, Space.page)
-            WeekGrid(allDays: visibleDays)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
+            if case .event(let id) = navigation.searchTarget?.destination, let hit = navigation.searchTarget {
+                PageScroll {
+                    Button("Show calendar", systemImage: Symbol.back) { navigation.searchTarget = nil }
+                    if let event = events.first(where: { $0.eventId == id }) {
+                        EventRow(event: event, showsLocation: true)
+                    } else {
+                        Text(hit.title).font(Type.t13)
+                        if let date = hit.date { Text(date, style: .date) }
+                        if let detail = hit.detail { Text(detail) }
+                        Text(loadedWeek == weekStart ? "Showing indexed details" : "Loading event…")
+                            .font(Type.t11)
+                            .foregroundStyle(Color.textMuted)
+                    }
+                }
+            } else {
+                WeekGrid(allDays: visibleDays)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .navigationTitle("Calendar")
@@ -149,6 +166,11 @@ struct PersonalCalendarView: View {
             if mode == .day { weekStart = Self.start(of: selectedDay) }
         }
         .task(id: weekStart) { await load() }
+        .task(id: navigation.searchTarget?.id) {
+            guard navigation.searchTarget?.kind == .event, let date = navigation.searchTarget?.date else { return }
+            selectedDay = Calendar.current.startOfDay(for: date)
+            weekStart = Self.start(of: date)
+        }
         .focusedSceneValue(\.refreshCurrent, RefreshAction { await load() })
     }
 

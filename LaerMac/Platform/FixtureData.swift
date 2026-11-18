@@ -20,6 +20,9 @@ struct FixtureTransport: ReadTransport {
         if isSignedOut() {
             return ReadResponse(status: 200, contentType: "text/html", body: Data("<html><form></form></html>".utf8))
         }
+        if request.routeTemplate == "courses/{id}/resources/search/v1" {
+            try await Task.sleep(for: .milliseconds(900))
+        }
         guard let body = Self.body(for: request) else {
             let status = request.routeTemplate == "assignments/{id}/v1" ? 403 : 404
             return ReadResponse(status: status, contentType: "application/json", body: Data("{}".utf8))
@@ -56,6 +59,16 @@ struct FixtureTransport: ReadTransport {
              "LearningObjectId": 9001, "LearningObjectInstanceId": 9101},
             {"ElementId": 703, "ElementType": "LearningToolElement", "Title": "Course page", "Url": "/page/703"}
             """#, count: 3))}
+            """#
+        case "courses/{id}/resources/search/v1":
+            guard request.path.contains("/11/"),
+                  request.query.contains(where: { $0.name == "searchText" && $0.value?.lowercased() == "syllabus" })
+            else { return #"{"Resources": \#(page("", count: 0))}"# }
+            return #"""
+            {"Resources": \#(page(#"""
+            {"ElementId":702,"ElementType":"LearningToolElement","Title":"Syllabus.pdf","CourseId":11,"LearningObjectId":9001},
+            {"ElementId":799,"ElementType":"LearningToolElement","Title":"Fieldwork syllabus.pdf","CourseId":11,"LearningObjectId":9003}
+            """#, count: 2))}
             """#
         case "courses/{id}/folders/{id}/resources/v1":
             return #"""
@@ -277,13 +290,18 @@ enum FixtureFiles {
     ]
 
     /// A real three-page PDF, so the viewer's pages and thumbnails have something to show.
-    static func pdf(title: String) -> Data {
+    static func pdf(title: String, scannedPage: Int? = nil) -> Data {
         let data = NSMutableData()
         var box = CGRect(x: 0, y: 0, width: 612, height: 792)
         guard let consumer = CGDataConsumer(data: data),
               let context = CGContext(consumer: consumer, mediaBox: &box, nil) else { return Data() }
         for page in 1...3 {
             context.beginPDFPage(nil)
+            if page == scannedPage, let image = scan(size: box.size) {
+                context.draw(image, in: box)
+                context.endPDFPage()
+                continue
+            }
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
             let text = NSAttributedString(string: "\(title), page \(page)", attributes: [.font: NSFont.systemFont(ofSize: 24)])
@@ -296,6 +314,22 @@ enum FixtureFiles {
         }
         context.closePDF()
         return data as Data
+    }
+
+    private static func scan(size: CGSize) -> CGImage? {
+        guard let bitmap = CGContext(data: nil, width: Int(size.width * 2), height: Int(size.height * 2),
+                                     bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(),
+                                     bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+        bitmap.scaleBy(x: 2, y: 2)
+        bitmap.setFillColor(gray: 1, alpha: 1)
+        bitmap.fill(CGRect(origin: .zero, size: size))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: bitmap, flipped: false)
+        NSAttributedString(string: "Summer field observations", attributes: [
+            .font: NSFont.systemFont(ofSize: 30), .foregroundColor: NSColor.black,
+        ]).draw(at: CGPoint(x: 70, y: size.height - 180))
+        NSGraphicsContext.restoreGraphicsState()
+        return bitmap.makeImage()
     }
 }
 

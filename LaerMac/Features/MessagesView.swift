@@ -4,11 +4,13 @@ import SwiftUI
 /// Message threads beside the open conversation.
 struct MessagesView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     @State private var loader = CollectionLoader<MessageThread>(key: "message-threads", coverage: .recentWindow) { client in
         let list = try await client.messageThreads()
         return PagedResult(items: list.threads, isComplete: true)
     }
     @State private var selectedThread: Int?
+    @State private var searchThread: MessageThread?
     @State private var composingNew = false
 
     var body: some View {
@@ -23,17 +25,30 @@ struct MessagesView: View {
                         await loader.refresh(using: model)
                         selectedThread = threadId
                     }
-                } else if let thread = loader.records.first(where: { $0.threadId == selectedThread }) {
+                } else if let thread = loader.records.first(where: { $0.threadId == selectedThread })
+                            ?? searchThread.flatMap({ $0.threadId == selectedThread ? $0 : nil }) {
                     ThreadView(thread: thread, me: myId) { await loader.refresh(using: model) }
                         .id(thread.threadId)
                 } else {
-                    PageScroll { EmptyLine(loader.records.isEmpty ? "" : "Choose a conversation") }
+                    PageScroll {
+                        if selectedThread != nil { EmptyLine("This conversation is unavailable") }
+                        else { EmptyLine(loader.records.isEmpty ? "" : "Choose a conversation") }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .navigationTitle("Messages")
         .task { await loader.load(using: model) }
+        .task(id: navigation.searchTarget?.id) {
+            guard case .thread(let id) = navigation.searchTarget?.destination else { return }
+            let store = model.snapshots
+            let saved = await store?.load(MessageThread.self, collection: "search-recent-threads")?.records
+            guard !Task.isCancelled, store === model.snapshots else { return }
+            composingNew = false
+            searchThread = saved?.first { $0.threadId == id }
+            selectedThread = id
+        }
         .focusedSceneValue(\.refreshCurrent, RefreshAction { await loader.refresh(using: model) })
     }
 
