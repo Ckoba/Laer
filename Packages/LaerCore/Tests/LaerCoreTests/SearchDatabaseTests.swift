@@ -76,6 +76,38 @@ import Testing
         #expect(!(try await db.hasDocument(resourceKey: asset.id, version: "updated.pdf")))
     }
 
+    @Test func enrichesCachedDocumentMetadataWithoutDiscardingEmbeddedOrOCRText() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let index = try await SnapshotStore(rootDirectory: root, accountKey: "a").searchDatabase()
+        let asset = LocalAsset(id: "LearningToolElement-7", relativePath: "saved.pdf", displayName: "Reading.pdf",
+                               byteCount: 1, contentType: "application/pdf", downloadedAt: .distantPast)
+        try await index.replaceDocument(asset: asset, resource: nil, pages: [
+            DocumentSearchPage(index: 0, text: "Embedded statistics chapter")
+        ])
+        try await index.appendOCRBatch(
+            DocumentOCRBatch(startPage: 0, pages: [DocumentSearchPage(index: 1, text: "Scanned field observations")],
+                             nextPage: nil),
+            asset: asset, resource: nil
+        )
+        #expect(try await index.search("statistics", scope: .course(42), activeCourseIds: []).isEmpty)
+        var resource = Resource(elementId: 7, elementType: "LearningToolElement",
+                                title: "Updated Reading.pdf", courseId: 42)
+        resource.path = "Course 42 / Week 1"
+        #expect(try await index.enrichDocument(asset: asset, resource: resource))
+        #expect(!(try await index.enrichDocument(asset: asset, resource: resource)))
+        let embedded = try await index.search("statistics", scope: .course(42), activeCourseIds: [])
+        #expect(embedded.first?.title == "Updated Reading.pdf")
+        #expect(embedded.first?.resource == resource)
+        #expect(embedded.first?.document?.page == 0)
+        #expect(embedded.first?.excerpt?.contains("Embedded statistics") == true)
+        let ocr = try await index.search("scanned field", scope: .course(42), activeCourseIds: [])
+        #expect(ocr.first?.document?.recognizedText == true)
+        #expect(ocr.first?.document?.page == 1)
+        #expect(try await index.nextOCRPage(resourceKey: asset.id, version: asset.relativePath) == nil)
+        #expect(try await index.count() == 2)
+    }
+
     @Test func readsPlainTextAndReportsUnsupportedFiles() throws {
         let root = temporaryRoot()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

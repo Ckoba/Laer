@@ -76,6 +76,78 @@ public actor SearchDatabase {
                   bodies: bodies, document: DocumentWrite(asset: asset, ocr: ocr))
     }
 
+    /// Add course context to indexed copies without re-reading the file or losing OCR progress.
+    public func enrichDocument(asset: LocalAsset, resource: Resource) throws -> Bool {
+        struct Row {
+            let rowid: Int64
+            let hit: SearchHit
+            let body: String
+        }
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        var changed = false
+        try db.transaction {
+            for collection in ["document-\(asset.id)", "ocr-\(asset.id)"] {
+                let rows = try db.withStatement(
+                    "SELECT rowid, payload, body FROM search_records WHERE collection = ?"
+                ) { statement -> [Row] in
+                    try db.bind([.text(collection)], to: statement)
+                    var rows: [Row] = []
+                    while true {
+                        let status = sqlite3_step(statement)
+                        if status == SQLITE_DONE { return rows }
+                        try db.check(status, expected: SQLITE_ROW)
+                        rows.append(Row(
+                            rowid: sqlite3_column_int64(statement, 0),
+                            hit: try decoder.decode(SearchHit.self, from: db.data(statement, column: 1)),
+                            body: String(decoding: db.data(statement, column: 2), as: UTF8.self)
+                        ))
+                    }
+                }
+                for row in rows {
+                    try Task.checkCancellation()
+                    var hit = row.hit
+                    guard hit.document?.version == asset.relativePath else { continue }
+                    var enriched = resource
+                    if let previous = hit.resource {
+                        enriched.courseId = enriched.courseId ?? previous.courseId
+                        enriched.url = enriched.url ?? previous.url
+                        enriched.contentUrl = enriched.contentUrl ?? previous.contentUrl
+                        enriched.path = enriched.path ?? previous.path
+                        enriched.learningToolId = enriched.learningToolId ?? previous.learningToolId
+                        enriched.learningObjectId = enriched.learningObjectId ?? previous.learningObjectId
+                        enriched.learningObjectInstanceId = enriched.learningObjectInstanceId ?? previous.learningObjectInstanceId
+                    }
+                    let title = enriched.title.isEmpty ? asset.displayName : enriched.title
+                    let detail = enriched.path ?? hit.detail
+                    let courseId = enriched.courseId ?? hit.courseId
+                    let fileExtension = SearchHit.fileExtension(of: asset.displayName) ?? hit.fileExtension
+                    guard hit.title != title || hit.detail != detail || hit.courseId != courseId
+                            || hit.resource != enriched || hit.fileExtension != fileExtension else { continue }
+                    hit.title = title
+                    hit.detail = detail
+                    hit.courseId = courseId
+                    hit.resource = enriched
+                    hit.fileExtension = fileExtension
+                    let searchable = ([hit.detail ?? ""] + (hit.contexts ?? []) + [row.body]).joined(separator: " ")
+                    try db.run("""
+                        UPDATE search_records SET course = ?, format = ?, title = ?, detail = ?, payload = ?
+                        WHERE rowid = ?
+                        """, [
+                            courseId.map { .integer(Int64($0)) } ?? .null,
+                            fileExtension.map { .text($0.lowercased()) } ?? .null,
+                            .text(SearchIndex.normalize(hit.title)), .text(SearchIndex.normalize(searchable)),
+                            .text(String(decoding: try encoder.encode(hit), as: UTF8.self)),
+                            .integer(row.rowid),
+                        ])
+                    changed = true
+                }
+            }
+        }
+        return changed
+    }
+
     public func removeDocument(resourceKey: String) throws {
         let key = "document-" + resourceKey
         try db.transaction {

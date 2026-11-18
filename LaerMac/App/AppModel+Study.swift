@@ -82,6 +82,7 @@ extension AppModel {
         if let url = await savedFileURL(for: resource) {
             guard !Task.isCancelled, store === snapshots else { return }
             viewerItem = ViewerItem(id: resource.id, title: resource.title, fileURL: url)
+            if let asset = savedAssets[resource.id] { queueDocumentSearch(asset, resource: resource) }
             noteRecent(resource)
             Perf.mark("saved file shown")
             return
@@ -586,6 +587,9 @@ extension AppModel {
             if case .readable(let extracted, _) = result { pages = extracted } else { pages = [] }
             try await index.replaceDocument(asset: asset, resource: work.resource, pages: pages)
             if index === searchIndex { searchRevision += 1 }
+        } else if let resource = work.resource {
+            if try await index.enrichDocument(asset: asset, resource: resource),
+               index === searchIndex { searchRevision += 1 }
         }
         guard DocumentOCR.formats.contains(url.pathExtension.lowercased()), canRunSearchOCR,
               let next = try await index.nextOCRPage(resourceKey: asset.id, version: asset.relativePath),
