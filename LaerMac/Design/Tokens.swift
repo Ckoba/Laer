@@ -32,18 +32,17 @@ enum Size {
     static let icon: CGFloat = 16
     static let iconSmall: CGFloat = 12
     static let readingColumn: CGFloat = 720
-    /// The one content column: every page's titles, cards and rows share its leading edge and this
-    /// maximum width. Trailing header actions sit at its trailing edge.
-    static let contentMax: CGFloat = 880
-    /// The widest a list or reading page grows (`PageScroll(width: .reading)`): the column is
-    /// left-aligned at the content inset and its metadata sits at its right edge, not the window's.
+    /// Pages fill their pane with `contentInset` on both sides, so there is no column cap.
+    static let contentMax: CGFloat = .infinity
+    /// The measure of running prose only (rich-text bodies, plan descriptions, updates, messages,
+    /// text areas), leading-aligned with `.readingWidth()`. Titles, tabs and rows fill the page.
     static let readingMax: CGFloat = 760
     /// The one inset between a screen's edge and its title, cards and row text.
     static let contentInset: CGFloat = Space.page
     /// Icons centre at 20, under the red window button. The sidebar starts here, so with
     /// `Sidebar.sidebarInset` 8 and a row's own 8, its icons centre at 64, under green.
     static let rail: CGFloat = 40
-    static let topBar: CGFloat = 40
+    static let topBar: CGFloat = 44
     /// The source list's default width; the person can drag it between `sidebarMin` and `sidebarMax`.
     static let sidebar: CGFloat = 220
     static let sidebarMin: CGFloat = 180
@@ -64,7 +63,7 @@ enum Size {
     static let palette: CGFloat = 560
 }
 
-/// Interface text is 500, titles (15 and 18) 600, course text 400 (`body`).
+/// Interface text is 500, titles (15 and 17) 600, course text 400 (`body`).
 enum Type {
     /// The two letters in a course's rail monogram.
     static let rail: Font = .system(size: 11, weight: .semibold)
@@ -74,7 +73,7 @@ enum Type {
     /// Course text and messages: what people read rather than scan.
     static let body: Font = .system(size: 13)
     static let t15: Font = .system(size: 15, weight: .semibold)
-    static let t18: Font = .system(size: 18, weight: .semibold)
+    static let t17: Font = .system(size: 17, weight: .semibold)
     /// A screen's own title (Home's date, Upcoming, a course name).
     static let title: Font = .system(size: 22, weight: .bold)
     /// Small uppercase-free group labels over sections, in the source list and on screens.

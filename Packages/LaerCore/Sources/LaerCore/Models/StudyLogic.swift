@@ -63,6 +63,28 @@ public enum PlanOrder {
         result.previous = ended.sorted { $0.end > $1.end }.map(\.plan)
         return result
     }
+
+    /// The plan whose start…stop range contains the event's start, preferring the shortest range.
+    public static func plan(for event: CalendarEvent, in plans: [PlanPreview], courseId: Int? = nil) -> PlanPreview? {
+        guard let targetCourse = courseId ?? event.courseId else { return nil }
+        if let eventCourse = event.courseId, eventCourse != targetCourse { return nil }
+        guard let eventStart = realDate(event.fromDate) else { return nil }
+        var best: (plan: PlanPreview, duration: TimeInterval, start: Date)?
+        for plan in plans {
+            if let planCourse = plan.courseId, planCourse != targetCourse { continue }
+            guard let start = realDate(plan.start), let stop = realDate(plan.stop), stop >= start else { continue }
+            guard (start...stop).contains(eventStart) else { continue }
+            let duration = stop.timeIntervalSince(start)
+            if let current = best {
+                let isBetter = duration < current.duration
+                    || (duration == current.duration && (start > current.start || (start == current.start && plan.planId < current.plan.planId)))
+                if isBetter { best = (plan, duration, start) }
+            } else {
+                best = (plan, duration, start)
+            }
+        }
+        return best?.plan
+    }
 }
 
 public struct ScheduleBlock: Identifiable, Sendable, Hashable {

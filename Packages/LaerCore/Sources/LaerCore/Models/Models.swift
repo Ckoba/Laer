@@ -275,19 +275,15 @@ extension Resource {
     }
 }
 
-/// Reduces API text that may contain markup to plain text for native display.
+/// Course text as plain lines, for search, stored text and previews. Reads HTML with the same
+/// parser the app draws from, so both agree on what the text says.
 public enum PlainText {
     public static func from(_ source: String) -> String {
         guard source.contains("<") || source.contains("&") else {
             return source.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        var text = source.replacingOccurrences(of: #"<(br|/p|/div|/li)[^>]*>"#, with: "\n", options: [.regularExpression, .caseInsensitive])
-        text = text.replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
-        let entities = ["&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"", "&#39;": "'"]
-        for (entity, value) in entities {
-            text = text.replacingOccurrences(of: entity, with: value)
-        }
-        text = text.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return RichText.lines(RichText.blocks(fromHTML: source))
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

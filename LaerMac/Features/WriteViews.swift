@@ -123,6 +123,9 @@ struct TextArea: View {
     let label: String
     @Binding var text: String
     var minHeight: CGFloat = 56
+    /// False when the area sits inside a surface that draws the edge itself.
+    var bordered = true
+    var onFocusChange: ((Bool) -> Void)?
     @FocusState private var isFocused: Bool
 
     /// Lines shown before the field grows, from the requested height.
@@ -137,13 +140,22 @@ struct TextArea: View {
             .focused($isFocused)
             .padding(.horizontal, Space.s8)
             .padding(.vertical, Space.s6)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(Color.stage))
-            .overlay(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).strokeBorder(Color.borderStrong, lineWidth: 1))
+            .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
+            .modifier(OptionalFieldChrome(bordered: bordered, focused: isFocused))
             // The padding around the text belongs to the field too.
             .contentShape(Rectangle())
             .onTapGesture { isFocused = true }
+            .onChange(of: isFocused) { _, focused in onFocusChange?(focused) }
             .accessibilityLabel(label)
+    }
+}
+
+private struct OptionalFieldChrome: ViewModifier {
+    let bordered: Bool
+    let focused: Bool
+
+    func body(content: Content) -> some View {
+        if bordered { content.fieldChrome(focused: focused) } else { content }
     }
 }
 
@@ -197,6 +209,7 @@ struct MessageComposer: View {
             }
         }
         .padding(.top, Space.s12)
+        .unsentDraft(!text.isBlank || !files.isEmpty)
     }
 
     private func attach() {
@@ -245,21 +258,79 @@ struct NewMessageView: View {
     @State private var files: [PickedFile] = []
     @State private var action = WriteAction()
     @State private var pickError: String?
+    @FocusState private var toFocused: Bool
+    @State private var bodyFocused = false
 
     private var canSend: Bool {
         !action.isRunning && !recipients.isEmpty
             && (!text.isBlank || !files.isEmpty)
     }
 
+    /// One centred column, at most `readingMax` wide, with equal space left and right.
+    private func column<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .frame(maxWidth: Size.readingMax, alignment: .leading)
+            .padding(.horizontal, Size.contentInset)
+            .frame(maxWidth: .infinity)
+    }
+
     var body: some View {
-        PageScroll {
-            HStack(spacing: Space.s6) {
-                IconButton(Symbol.close, label: "Close", action: onClose)
-                    .keyboardShortcut(.cancelAction)
-                Spacer(minLength: Space.s8)
+        VStack(alignment: .leading, spacing: 0) {
+            column {
+                PageHeader(title: "New message") {
+                    IconButton(Symbol.close, label: "Close", action: onClose)
+                        .keyboardShortcut(.cancelAction)
+                }
+                .padding(.top, Size.contentInset)
+                .padding(.bottom, Space.s12)
             }
-            PageHeader(title: "New message")
-                .padding(.vertical, Space.s8)
+            ScrollView {
+                column {
+                    VStack(alignment: .leading, spacing: Space.s8) {
+                        // Recipients and body are one surface with a hairline between, as in Mail.
+                        VStack(alignment: .leading, spacing: 0) {
+                            recipientsField
+                            Rectangle().fill(Color.border).frame(height: 1)
+                            TextArea(label: "Message", text: $text, minHeight: 96, bordered: false) { bodyFocused = $0 }
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: Radius.m, style: .continuous))
+                        .fieldChrome(focused: toFocused || bodyFocused)
+                        AttachmentList(files: $files)
+                    }
+                    .padding(.bottom, Space.s12)
+                }
+            }
+            Rectangle().fill(Color.border).frame(height: 1)
+            // The same footer as the thread's reply composer: 12pt insets, attach and Send on one baseline.
+            column {
+                VStack(alignment: .leading, spacing: Space.s6) {
+                    HStack(alignment: .center, spacing: Space.s8) {
+                        // The paperclip itself, not its hover square, starts on the surface's edge.
+                        IconButton(Symbol.attach, label: "Attach files") {
+                            pickError = nil
+                            do { files += try PickedFile.pick() } catch { pickError = WriteText.failure(error) }
+                        }
+                        .padding(.leading, -Space.s6)
+                        Spacer(minLength: Space.s8)
+                        if action.isRunning { Spinner() }
+                        TextButton("Send", role: .primary) { Task { await send() } }
+                            .keyboardShortcut(.return, modifiers: .command)
+                            .disabled(!canSend)
+                    }
+                    if case .failed(let message) = action.phase { ErrorLine(message) }
+                    if let pickError { ErrorLine(pickError) }
+                }
+                .padding(.vertical, Space.s12)
+            }
+        }
+        .background(Color.stage)
+        .task(id: query) { await search(query) }
+        .unsentDraft(!text.isBlank || !files.isEmpty)
+    }
+
+    /// Chosen people, the field that finds more, and the matches under it.
+    private var recipientsField: some View {
+        VStack(alignment: .leading, spacing: Space.s4) {
             ForEach(recipients) { person in
                 HStack(spacing: Space.s6) {
                     Text(person.label ?? "Unknown name")
@@ -270,10 +341,18 @@ struct NewMessageView: View {
                         recipients.removeAll { $0.id == person.id }
                     }
                 }
+                .padding(.horizontal, Space.s8)
             }
-            FieldBox(label: "To", text: $query)
-            if searchState.phase == .loading { Spinner() }
-            if case .failed(let message) = searchState.phase { ErrorLine(message) }
+            TextField("To", text: $query)
+                .textFieldStyle(.plain)
+                .font(Type.body)
+                .foregroundStyle(Color.text)
+                .focused($toFocused)
+                .padding(.horizontal, Space.s8)
+                .frame(height: Size.control)
+                .accessibilityLabel("To")
+            if searchState.phase == .loading { Spinner().padding(.horizontal, Space.s8) }
+            if case .failed(let message) = searchState.phase { ErrorLine(message).padding(.horizontal, Space.s8) }
             ForEach(results.filter { r in !recipients.contains { $0.id == r.id } }) { person in
                 RowButton(action: {
                     recipients.append(person)
@@ -287,7 +366,7 @@ struct NewMessageView: View {
                             .lineLimit(1)
                         if let detail = [person.role, person.organization].compactMap({ $0 }).first(where: { !$0.isEmpty }) {
                             Text(detail)
-                                .font(Type.t11)
+                                .font(Type.t12)
                                 .foregroundStyle(Color.textMuted)
                                 .lineLimit(1)
                         }
@@ -296,26 +375,9 @@ struct NewMessageView: View {
                 .accessibilityElement(children: .combine)
             }
             if !query.isEmpty, query.count >= 2, results.isEmpty, searchState.phase == .idle, searchState.lastSuccess != nil {
-                EmptyLine("No one matches")
-            }
-            TextArea(label: "Message", text: $text, minHeight: 96)
-                .padding(.top, Space.s8)
-            AttachmentList(files: $files)
-            HStack(spacing: Space.s8) {
-                IconButton(Symbol.attach, label: "Attach files") {
-                    pickError = nil
-                    do { files += try PickedFile.pick() } catch { pickError = WriteText.failure(error) }
-                }
-                Spacer(minLength: Space.s8)
-                if action.isRunning { Spinner() }
-                if case .failed(let message) = action.phase { ErrorLine(message) }
-                if let pickError { ErrorLine(pickError) }
-                TextButton("Send", role: .primary) { Task { await send() } }
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!canSend)
+                EmptyLine("No one matches").padding(.horizontal, Space.s8)
             }
         }
-        .task(id: query) { await search(query) }
     }
 
     /// Waits for typing to pause, then searches. Only people can be messaged from here.
@@ -398,6 +460,7 @@ struct BulletinComments: View {
         }
         .padding(.leading, Space.s16)
         .task { await loader.load(using: model) }
+        .unsentDraft(!draft.isBlank)
     }
 
     private func submit() async {
@@ -500,6 +563,9 @@ struct AssignmentView: View {
     @State private var pickError: String?
     @State private var submittedAnswer: Int?
 
+    /// An answer typed or attached but not submitted.
+    private var hasDraft: Bool { !text.isBlank || !files.isEmpty }
+
     init(elementId: Int, title: String, onClose: @escaping () -> Void) {
         self.elementId = elementId
         self.fallbackTitle = title
@@ -512,34 +578,39 @@ struct AssignmentView: View {
     var body: some View {
         let assignment = loader.records.first
         PageScroll {
-            HStack(spacing: Space.s6) {
-                IconButton(Symbol.back, label: "Back", action: onClose)
-                    .keyboardShortcut("[", modifiers: .command)
-                Spacer(minLength: Space.s8)
-            }
             PageHeader(title: assignment?.title ?? fallbackTitle)
-                .padding(.vertical, Space.s8)
+            courseLine(deadline: assignment?.deadline)
+                .padding(.top, -Space.s12)
+                .padding(.bottom, Space.s8)
             FreshnessLine(state: loader.state)
             if let assignment {
-                Text(StudyDates.deadline(assignment.deadline))
-                    .font(Type.t12)
-                    .foregroundStyle(Color.textMuted)
-                    .monospacedDigit()
                 if let html = assignment.text, !html.isEmpty {
-                    RichTextView(html: html).padding(.vertical, Space.s8)
+                    RichTextView(html: html)
+                        .frame(maxWidth: Size.readingMax, alignment: .leading)
+                        .padding(.vertical, Space.s8)
                 }
                 ForEach(assignment.files ?? []) { file in
-                    HStack(spacing: Space.s6) {
-                        Image(systemName: Symbol.material)
-                            .font(.system(size: 12, weight: .regular))
-                            .foregroundStyle(Color.textMuted)
-                            .accessibilityHidden(true)
-                        Text(file.name ?? "File")
-                            .font(Type.t13)
-                            .foregroundStyle(Color.text)
-                            .lineLimit(1)
+                    // No route fetches an assignment's file by its id, so it opens where the assignment lives.
+                    let address = attachmentURL
+                    RowButton(action: { if let address { NSWorkspace.shared.open(address) } }) {
+                        HStack(spacing: Space.s8) {
+                            Image(systemName: Symbol.file(extension: ((file.name ?? "") as NSString).pathExtension))
+                                .font(.system(size: 13, weight: .regular))
+                                .frame(width: Size.icon)
+                                .foregroundStyle(Color.textMuted)
+                                .accessibilityHidden(true)
+                            Text(file.name ?? "File")
+                                .font(Type.t13)
+                                .foregroundStyle(Color.text)
+                                .lineLimit(1)
+                            Spacer(minLength: Space.s8)
+                            if address != nil { WebsiteMark() }
+                        }
+                        .contentShape(Rectangle())
                     }
-                    .plainRow()
+                    .disabled(address == nil)
+                    // The row's own inset is cancelled, so the file starts on the title's and body's edge.
+                    .padding(.horizontal, -Space.s8)
                 }
                 submitForm(for: assignment)
             } else if case APIError.forbidden? = loader.lastError {
@@ -550,6 +621,44 @@ struct AssignmentView: View {
         }
         .task { await loader.load(using: model) }
         .focusedSceneValue(\.refreshCurrent, RefreshAction { await loader.refresh(using: model) })
+        .unsentDraft(hasDraft)
+    }
+
+    private var attachmentURL: URL? {
+        let task = model.tasks.first { $0.elementId == elementId }
+        return model.absoluteURL(task?.url ?? task?.contentUrl)
+    }
+
+    /// The course's dot and name, then when it is due, as list rows say it.
+    @ViewBuilder private func courseLine(deadline: Date?) -> some View {
+        let task = model.tasks.first { $0.elementId == elementId }
+        let courseId = task?.courseId
+        let name = courseId.flatMap { id in model.courses.first { $0.courseId == id }?.shortTitle } ?? task?.courseTitle
+        let due = StudyDates.usable(deadline ?? task?.deadline)
+        if name != nil || due != nil {
+            HStack(spacing: Space.s6) {
+                if let courseId {
+                    Circle()
+                        .fill(Color.course(courseId))
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                }
+                if let name {
+                    Text(name).lineLimit(1)
+                }
+                if name != nil, due != nil {
+                    Text("·").accessibilityHidden(true)
+                }
+                if let due {
+                    Text("Due \(StudyDates.relative(due))")
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+            .font(Type.t12)
+            .foregroundStyle(Color.textMuted)
+        }
     }
 
     @ViewBuilder private func submitForm(for assignment: Assignment) -> some View {
@@ -570,23 +679,26 @@ struct AssignmentView: View {
             } else if closed {
                 EmptyLine("The deadline has passed and late answers are not accepted")
             } else {
-            TextArea(label: "Answer text", text: $text, minHeight: 96)
-            AttachmentList(files: $files)
-            HStack(spacing: Space.s8) {
-                IconButton(Symbol.attach, label: "Attach files") {
-                    pickError = nil
-                    do { files += try PickedFile.pick() } catch { pickError = WriteText.failure(error) }
+                TextArea(label: "Answer text", text: $text, minHeight: 120)
+                AttachmentList(files: $files)
+                HStack(spacing: Space.s8) {
+                    IconButton(Symbol.attach, label: "Attach files") {
+                        pickError = nil
+                        do { files += try PickedFile.pick() } catch { pickError = WriteText.failure(error) }
+                    }
+                    // The paperclip itself, not its hover square, starts on the answer box's edge.
+                    .padding(.leading, -Space.s6)
+                    // What Submit will send, said before it is pressed.
+                    Text(summary)
+                        .font(Type.t11)
+                        .foregroundStyle(Color.textMuted)
+                    Spacer(minLength: Space.s8)
+                    if submit.isRunning { Spinner() }
+                    if case .failed(let message) = submit.phase { ErrorLine(message) }
+                    if let pickError { ErrorLine(pickError) }
+                    TextButton("Submit", role: .primary) { Task { await send() } }
+                        .disabled(submit.isRunning || (text.isBlank && files.isEmpty))
                 }
-                Text(summary)
-                    .font(Type.t11)
-                    .foregroundStyle(Color.textMuted)
-                Spacer(minLength: Space.s8)
-                if submit.isRunning { Spinner() }
-                if case .failed(let message) = submit.phase { ErrorLine(message) }
-                if let pickError { ErrorLine(pickError) }
-                TextButton("Submit", role: .primary) { Task { await send() } }
-                    .disabled(submit.isRunning || (text.isBlank && files.isEmpty))
-            }
             }
         }
     }

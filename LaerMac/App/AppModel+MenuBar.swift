@@ -25,6 +25,18 @@ extension AppModel {
         return Array(all.sorted { ($0.start ?? .distantFuture) < ($1.start ?? .distantFuture) }.prefix(limit))
     }
 
+    /// The plan matching a calendar event from plans already in memory, if any.
+    func plan(for event: CalendarEvent, courseId: Int? = nil) -> PlanPreview? {
+        guard let targetCourse = courseId ?? event.courseId, let coursePlans = plans[targetCourse] else { return nil }
+        return PlanOrder.plan(for: event, in: coursePlans, courseId: targetCourse)
+    }
+
+    /// Reads the event's course plans when none are in memory, so `plan(for:)` can answer.
+    func loadPlansIfNeeded(for event: CalendarEvent) async {
+        guard let course = event.courseId, plans[course] == nil else { return }
+        await loadPlans(courseId: course)
+    }
+
     /// The menu opened: plans refresh if stale, and the shown readings are saved ahead so they open at once.
     func menuBarOpened() {
         guard case .ready = authState, readingPrefetch == nil else { return }

@@ -14,6 +14,7 @@ enum Symbol {
     static let showInFinder = "folder"
     static let copy = "doc.on.doc"
     static let back = "chevron.backward"
+    static let forward = "chevron.forward"
     static let disclosure = "chevron.forward"
     static let more = "ellipsis.circle"
     static let attach = "paperclip"

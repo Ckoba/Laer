@@ -78,7 +78,6 @@ final class CollectionLoader<Record: Codable & Sendable> {
 
 // MARK: - Rich text
 
-/// Course text drawn natively from `RichText` blocks. Nothing here runs a web view.
 /// One derived value per screen, recomputed only when its inputs change. Not observed: reading
 /// it never causes a redraw. Hold it in `@State` so it lives as long as the screen.
 @MainActor
@@ -107,6 +106,7 @@ func currentMinute() -> Date {
 enum RichTextCache {
     private static var parsed: [String: [RichBlock]] = [:]
     private static var plain: [String: String] = [:]
+    private static var inlined: [String: AttributedString] = [:]
     /// Enough for every row on the busiest screen; cleared whole when exceeded.
     private static let limit = 600
 
@@ -118,22 +118,63 @@ enum RichTextCache {
         return result
     }
 
-    /// One plain line for a row's preview.
-    static func plainText(_ html: String) -> String {
+    /// One line for a row's preview: breaks and paragraphs become spaces, so `lineLimit` shows
+    /// as much of the text as fits rather than only its first paragraph.
+    static func preview(_ html: String) -> String {
         if let hit = plain[html] { return hit }
         if plain.count >= limit { plain.removeAll(keepingCapacity: true) }
-        let result = RichText.plainText(blocks(html))
+        let result = RichText.preview(blocks(html))
         plain[html] = result
+        return result
+    }
+
+    /// A short text with its inline formatting (bold, italic, underline, strikethrough) for a row
+    /// that is itself a button, where a selectable body would take its clicks. Blocks become lines.
+    static func inline(_ html: String) -> AttributedString {
+        if let hit = inlined[html] { return hit }
+        if inlined.count >= limit { inlined.removeAll(keepingCapacity: true) }
+        var result = AttributedString()
+        for block in blocks(html) {
+            let runs: [RichRun]
+            switch block {
+            case .heading(_, let r), .paragraph(let r), .quote(let r): runs = r
+            case .listItem(let ordered, let number, _, let r): runs = [RichRun(text: ordered ? "\(number). " : "\u{2022} ")] + r
+            case .table(let rows): runs = rows.flatMap { $0.flatMap { $0.runs + [RichRun(text: " ")] } }
+            case .code(let text): runs = [RichRun(text: text)]
+            case .image(_, let alt): runs = alt.map { [RichRun(text: $0)] } ?? []
+            case .embed, .rule: runs = []
+            }
+            guard !runs.isEmpty else { continue }
+            if !result.characters.isEmpty { result += AttributedString("\n") }
+            for run in runs {
+                var part = AttributedString(run.text)
+                var intent: InlinePresentationIntent = []
+                if run.bold { intent.insert(.stronglyEmphasized) }
+                if run.italic { intent.insert(.emphasized) }
+                if run.code { intent.insert(.code) }
+                if !intent.isEmpty { part.inlinePresentationIntent = intent }
+                if run.underline { part.underlineStyle = .single }
+                if run.strikethrough { part.strikethroughStyle = .single }
+                result += part
+            }
+        }
+        inlined[html] = result
         return result
     }
 }
 
+/// A body of course text: one selectable, read-only text view, so ⌘A, a drag and Copy cover every
+/// paragraph, list and heading in it. Links open through the app's own link handling.
 struct RichTextView: View {
     @Environment(AppModel.self) private var model
     let blocks: [RichBlock]
+    var tone: RichTextTone = .page
+    var hugsWidth = false
 
-    init(html: String) {
+    init(html: String, tone: RichTextTone = .page, hugsWidth: Bool = false) {
         blocks = RichTextCache.blocks(html)
+        self.tone = tone
+        self.hugsWidth = hugsWidth
     }
 
     init(blocks: [RichBlock]) {
@@ -141,108 +182,9 @@ struct RichTextView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Space.s8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                view(for: block)
-            }
+        RichTextBody(blocks: blocks, tone: tone, hugsWidth: hugsWidth) { link in
+            if let url = resolve(link) { NSWorkspace.shared.open(url) }
         }
-        .textSelection(.enabled)
-        .environment(\.openURL, OpenURLAction { url in
-            if let resolved = resolve(url.absoluteString) {
-                NSWorkspace.shared.open(resolved)
-            }
-            return .handled
-        })
-    }
-
-    @ViewBuilder private func view(for block: RichBlock) -> some View {
-        switch block {
-        case .heading(let level, let runs):
-            Text(attributed(runs))
-                .font(level <= 2 ? Type.t15 : Type.t13.weight(.semibold))
-                .foregroundStyle(Color.text)
-                .padding(.top, Space.s4)
-                .accessibilityAddTraits(.isHeader)
-        case .paragraph(let runs):
-            body(runs)
-        case .listItem(let ordered, let number, let depth, let runs):
-            HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
-                Text(ordered ? "\(number)." : "\u{2022}")
-                    .font(Type.body)
-                    .foregroundStyle(Color.textMuted)
-                    .monospacedDigit()
-                body(runs)
-            }
-            .padding(.leading, CGFloat(depth) * Space.s16)
-        case .quote(let runs):
-            body(runs)
-                .foregroundStyle(Color.textMuted)
-                .padding(.leading, Space.s16)
-        case .code(let text):
-            Text(text)
-                .font(Type.mono12)
-                .foregroundStyle(Color.text)
-                .padding(Space.s8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: Radius.s, style: .continuous).fill(Color.raised))
-        case .image(let source, let alt):
-            linkRow(title: alt.flatMap { $0.isEmpty ? nil : $0 } ?? "Image", source: source)
-        case .embed(let source):
-            linkRow(title: "Embedded content", source: source)
-        case .rule:
-            Rectangle().fill(Color.border).frame(height: 1)
-        }
-    }
-
-    private func body(_ runs: [RichRun]) -> some View {
-        Text(attributed(runs))
-            .font(Type.body)
-            .lineSpacing(Type.bodyLineSpacing)
-            .foregroundStyle(Color.text)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    /// Images and embeds need the website's session, so they open there instead of loading here.
-    private func linkRow(title: String, source: String) -> some View {
-        HStack(spacing: Space.s6) {
-            Image(systemName: Symbol.link)
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(Color.textMuted)
-                .accessibilityHidden(true)
-            Text(title)
-                .font(Type.t12)
-                .foregroundStyle(Color.textMuted)
-                .lineLimit(1)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { if let url = resolve(source) { NSWorkspace.shared.open(url) } }
-        .help("Open on the website")
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isLink)
-    }
-
-    private func attributed(_ runs: [RichRun]) -> AttributedString {
-        var result = AttributedString()
-        for run in runs {
-            var part = AttributedString(run.text)
-            if run.code {
-                part.font = Type.mono12
-            } else if run.bold && run.italic {
-                part.font = Type.body.weight(.semibold).italic()
-            } else if run.bold {
-                part.font = Type.body.weight(.semibold)
-            } else if run.italic {
-                part.font = Type.body.italic()
-            }
-            if let link = run.link, let url = URL(string: link) {
-                part.link = url
-                // Links read by underline, not hue.
-                part.foregroundColor = Color.text
-                part.underlineStyle = .single
-            }
-            result += part
-        }
-        return result
     }
 
     private func resolve(_ link: String) -> URL? {

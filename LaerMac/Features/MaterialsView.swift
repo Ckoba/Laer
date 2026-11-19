@@ -2,21 +2,33 @@ import AppKit
 import LaerCore
 import SwiftUI
 
-/// Folder-by-folder browsing. A listing covers its folder, not the whole course.
+/// Folder-by-folder browsing. A listing covers its folder, not the whole course. The open folders
+/// and page live in `Navigation`, so each one is a history entry and Back returns to it.
 struct MaterialsView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     let course: Course
-    @State private var path: [Resource] = []
-    @State private var reading: Resource?
+
+    private var path: [Resource] {
+        get { navigation.folder(for: course.courseId).path }
+        nonmutating set { navigation.folders[course.courseId, default: FolderPlace()].path = newValue }
+    }
+
+    private var reading: Resource? {
+        get { navigation.folder(for: course.courseId).reading }
+        nonmutating set { navigation.folders[course.courseId, default: FolderPlace()].reading = newValue }
+    }
 
     private var folderId: Int? { path.last?.elementId }
     private var key: String { AppModel.folderKey(courseId: course.courseId, folderId: folderId) }
 
     var body: some View {
-        if let reading {
-            PageReaderView(resource: reading) { self.reading = nil }
-        } else {
-            list
+        Group {
+            if let reading {
+                PageReaderView(resource: reading) { self.reading = nil }
+            } else {
+                list
+            }
         }
     }
 
@@ -25,16 +37,9 @@ struct MaterialsView: View {
         let state = model.resourcesState[key] ?? CollectionState()
         PageScroll(spacing: 0, lazy: true) {
             if !path.isEmpty {
-                HStack(spacing: Space.s6) {
-                    IconButton(Symbol.back, label: "Back") { path.removeLast() }
-                        .keyboardShortcut("[", modifiers: .command)
-                    Text(path.map(\.title).joined(separator: " / "))
-                        .font(Type.t12)
-                        .foregroundStyle(Color.textMuted)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                }
-                .padding(.bottom, Space.s4)
+                // Back, from the top bar or ⌘[, returns up a folder: each folder is a history entry.
+                breadcrumb
+                    .padding(.bottom, Space.s8)
             }
             FreshnessLine(state: state)
             if items.isEmpty {
@@ -56,8 +61,56 @@ struct MaterialsView: View {
     }
 }
 
+extension MaterialsView {
+    /// "Files › Week 47": each parent is a button that goes back up to that level; the current folder is plain text.
+    private var breadcrumb: some View {
+        HStack(spacing: Space.s6) {
+            crumb("Files", levels: 0)
+            ForEach(Array(path.enumerated()), id: \.offset) { index, folder in
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.textMuted)
+                    .accessibilityHidden(true)
+                if index == path.count - 1 {
+                    Text(folder.title)
+                        .font(Type.body)
+                        .foregroundStyle(Color.text)
+                        .lineLimit(1)
+                        .accessibilityAddTraits(.isHeader)
+                } else {
+                    crumb(folder.title, levels: index + 1)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func crumb(_ title: String, levels: Int) -> some View {
+        Button { path = Array(path.prefix(levels)) } label: {
+            Text(title)
+                .font(Type.body)
+                .lineLimit(1)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(CrumbStyle())
+        .focusEffectDisabled()
+    }
+}
+
+private struct CrumbStyle: ButtonStyle {
+    @State private var isHovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(isHovering || configuration.isPressed ? Color.text : Color.textMuted)
+            .onHover { isHovering = $0 }
+    }
+}
+
 struct ResourceRow: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.rowsDivided) private var divided
+    @Environment(\.rowDividerHidden) private var dividerHidden
     let resource: Resource
     let onOpenFolder: () -> Void
     let onRead: () -> Void
@@ -91,7 +144,25 @@ struct ResourceRow: View {
         return isFile || isSaved ? Symbol.file(extension: (resource.title as NSString).pathExtension) : Symbol.link
     }
 
+    // A button, so Tab reaches every file and Space or Return opens it.
     var body: some View {
+        RowButton(selected: model.viewerItem?.id == resource.id, action: primaryAction) { content }
+            // The shared hairline starts at the icon; this one starts at the title.
+            .environment(\.rowDividerHidden, true)
+            .background(alignment: .bottom) {
+                if divided, !dividerHidden {
+                    Rectangle()
+                        .fill(Color.border)
+                        .frame(height: 1)
+                        .padding(.leading, Space.s8 + Size.icon + Space.s8)
+                        .padding(.trailing, Space.s8)
+                }
+            }
+            .onHover { isHovered = $0 }
+            .contextMenu { menu }
+    }
+
+    private var content: some View {
         HStack(spacing: Space.s8) {
             Image(systemName: rowSymbol)
                 .font(.system(size: 13, weight: .regular))
@@ -110,17 +181,14 @@ struct ResourceRow: View {
             Spacer(minLength: Space.s8)
             actions
                 .frame(width: Size.icon, alignment: .center)
-            // Every row opens something, so every row carries the chevron.
-            RowTrailing(date: nil, chevron: true)
+            // A chevron only where a folder opens; an arrow where the website does.
+            if isWebsiteOnly {
+                WebsiteMark()
+            } else if resource.isFolder {
+                RowTrailing(date: nil, chevron: true)
+            }
         }
-        .laerRow(selected: model.viewerItem?.id == resource.id)
         .contentShape(Rectangle())
-        .onHover { isHovered = $0 }
-        .onTapGesture { primaryAction() }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { primaryAction() }
-        .contextMenu { menu }
     }
 
     @ViewBuilder private var actions: some View {
@@ -128,14 +196,21 @@ struct ResourceRow: View {
             EmptyView()
         } else if model.downloadStates[resource.id] == .downloading {
             Spinner()
-        } else if isSaved {
+        } else if isSaved, model.viewerItem?.id != resource.id {
+            // The open row is already marked by its selection.
             Image(systemName: Symbol.saved)
                 .font(.system(size: 11, weight: .regular))
                 .foregroundStyle(Color.textMuted)
                 .accessibilityLabel("Downloaded")
                 .help("Downloaded")
         } else if isFile, isHovered {
-            IconButton(Symbol.save, label: "Download") { Task { await model.download(resource) } }
+            IconButton(Symbol.save, label: "Download") {
+                Task {
+                    await model.download(resource)
+                    // Not a file after all: it opens where it lives.
+                    if isWebsiteOnly, let url = originalURL { NSWorkspace.shared.open(url) }
+                }
+            }
         }
     }
 
@@ -170,6 +245,8 @@ struct ResourceRow: View {
         }
     }
 
+    private var isWebsiteOnly: Bool { model.downloadStates[resource.id] == .websiteOnly }
+
     private var originalURL: URL? {
         model.absoluteURL(resource.url) ?? model.absoluteURL(resource.contentUrl)
     }
@@ -178,6 +255,8 @@ struct ResourceRow: View {
         guard model.downloadStates[resource.id] != .downloading else { return }
         if resource.isFolder {
             onOpenFolder()
+        } else if isWebsiteOnly, let url = originalURL {
+            NSWorkspace.shared.open(url)
         } else if isSaved {
             Task { await openSaved() }
         } else if FileAcquirer.canAttempt(resource) {
@@ -208,7 +287,6 @@ struct ResourceRow: View {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = asset.displayName
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        try? FileManager.default.removeItem(at: destination)
-        try? FileManager.default.copyItem(at: source, to: destination)
+        FileExport.copy(source, to: destination)
     }
 }

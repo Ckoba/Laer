@@ -64,16 +64,12 @@ struct PageReaderView: View {
 
     var body: some View {
         PageScroll {
-            HStack(spacing: Space.s6) {
-                IconButton(Symbol.back, label: "Back", action: onClose)
-                    .keyboardShortcut("[", modifiers: .command)
-                Spacer(minLength: Space.s8)
+            // Back is the top bar's, and Escape's.
+            PageHeader(title: loader.records.first?.title ?? resource.title) {
                 if let url = model.absoluteURL(resource.url) {
                     IconButton(Symbol.open, label: "Open on the website") { NSWorkspace.shared.open(url) }
                 }
             }
-            PageHeader(title: loader.records.first?.title ?? resource.title)
-                .padding(.vertical, Space.s8)
             FreshnessLine(state: loader.state)
             if let page = loader.records.first {
                 let blocks = page.orderedBlocks
@@ -106,6 +102,7 @@ private struct ContentBlockView: View {
             }
             if let html = block.html, !html.isEmpty {
                 RichTextView(html: html)
+                    .frame(maxWidth: Size.readingMax, alignment: .leading)
             }
             ForEach(Array((block.files ?? []).enumerated()), id: \.offset) { _, file in
                 HStack(spacing: Space.s6) {

@@ -29,14 +29,14 @@ struct MainView: View {
                 shell(showsSidebar: shows)
             }
             .background(Color.rail)
-            .background(WindowButtonAligner(firstButtonCenterX: Size.rail / 2, centerY: Size.topBar / 2 + Space.s2))
-            .background(WindowButtonWatch(centerY: Size.topBar / 2 + Space.s2))
+            .background(WindowButtonWatch(firstButtonCenterX: Size.rail / 2, centerY: Size.topBar / 2))
         }
         .ignoresSafeArea(.container, edges: .top)
         .environment(navigation)
         .overlay {
             if navigation.isPaletteOpen {
-                CommandPalette()
+                CommandPalette(restoring: navigation.paletteRestore)
+                    .id(navigation.paletteID)
                     .environment(navigation)
                     .transition(.opacity)
             }
@@ -48,7 +48,41 @@ struct MainView: View {
         .onChange(of: model.viewerItem == nil) { _, closed in
             if closed { keepsSidebarWithFile = false }
         }
-        .focusedSceneValue(\.openPalette, PaletteAction { navigation.isPaletteOpen = true })
+        // Every change of place is one history entry; another account starts with none.
+        .onAppear { navigation.start(model) }
+        .onChange(of: navigation.place(model)) { navigation.record() }
+        .onChange(of: model.snapshots.map(ObjectIdentifier.init)) { navigation.start(model) }
+        .onPreferenceChange(UnsentDraftKey.self) { [navigation] hasDraft in
+            MainActor.assumeIsolated { navigation.hasDraft = hasDraft }
+        }
+        .alert(
+            "Discard your draft?",
+            isPresented: Binding(get: { navigation.pendingMove != nil }, set: { if !$0 { navigation.pendingMove = nil } }),
+            presenting: navigation.pendingMove
+        ) { move in
+            Button(move == .back ? "Discard and Go Back" : "Discard and Go Forward", role: .destructive) {
+                navigation.move(move, confirmed: true)
+            }
+            Button("Keep Editing", role: .cancel) {}
+        } message: { _ in
+            Text("What you have written here has not been sent.")
+        }
+        .background(HistoryEventMonitor(
+            canGoBack: navigation.canGoBack,
+            canGoForward: navigation.canGoForward,
+            isSuspended: navigation.isPaletteOpen || navigation.pendingMove != nil,
+            onBack: { navigation.goBack() },
+            onForward: { navigation.goForward() },
+            onSwipeProgress: { navigation.swipeFeedback = $0 }
+        ))
+        .focusedSceneValue(\.history, HistoryActions(
+            canGoBack: navigation.canGoBack, canGoForward: navigation.canGoForward,
+            back: { navigation.goBack() }, forward: { navigation.goForward() }
+        ))
+        .onReceive(NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange).receive(on: RunLoop.main)) { _ in
+            model.updateSearchOCR()
+        }
+        .focusedSceneValue(\.openPalette, PaletteAction { openPalette() })
         .alert("Make lecture briefs on this Mac?", isPresented: Binding(
             get: { model.briefs.shouldAsk },
             set: { _ in }
@@ -61,6 +95,13 @@ struct MainView: View {
         // A file opened from the menu bar shows its course on Plans, where the file lives.
         .onAppear(perform: takePlansTabRequest)
         .onChange(of: model.plansTabRequest) { _, _ in takePlansTabRequest() }
+        // Settings removes recognized text without access to this window's navigation.
+        .onChange(of: model.searchOCRIsClearing) { _, clearing in if clearing { navigation.forgetRecognizedText() } }
+    }
+
+    private func openPalette() {
+        navigation.paletteRestore = nil
+        navigation.isPaletteOpen = true
     }
 
     private func takePlansTabRequest() {
@@ -83,9 +124,16 @@ struct MainView: View {
             }
             .keyboardShortcut("s", modifiers: [.control, .command])
             .accessibilityIdentifier("topbar.sidebar")
+            // ⌘[ and ⌘] live on the Go menu's Back and Forward, which call the same moves.
+            IconButton(Symbol.back, label: "Back", help: "Back (⌘[)", symbolSize: 15) { navigation.goBack() }
+                .disabled(!navigation.canGoBack)
+                .accessibilityIdentifier("topbar.back")
+            IconButton(Symbol.forward, label: "Forward", help: "Forward (⌘])", symbolSize: 15) { navigation.goForward() }
+                .disabled(!navigation.canGoForward)
+                .accessibilityIdentifier("topbar.forward")
             Spacer(minLength: 0)
             // The same items in the same places with or without the sidebar.
-            SearchFieldButton { navigation.isPaletteOpen = true }
+            SearchFieldButton { openPalette() }
             RefreshButton()
             if ParityGate.notifications {
                 NotificationsButton()
@@ -93,8 +141,6 @@ struct MainView: View {
                     .padding(.trailing, Space.s16)
             }
         }
-        // 2pt down, so the bell's count badge, which rides above the icon, clears the window's top edge.
-        .offset(y: Space.s2)
         // Clears the window's close, minimise and zoom buttons.
         .padding(.leading, 84)
         .frame(height: Size.topBar)
@@ -126,8 +172,10 @@ struct MainView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
                 .background(Color.stage)
+                .modifier(HistorySwipeShift())
             }
             .frame(minWidth: 260, maxWidth: .infinity)
+            .overlay { HistorySwipeOverlay() }
             .clipShape(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous))
             // The same 8pt of frame on every side: right and bottom here, the left from the
             // sidebar's own row inset (or the rail's tile margin, topped up below), the top from
@@ -158,63 +206,6 @@ struct MainView: View {
     }
 }
 
-/// Keeps the window buttons on the top bar's row on every screen. AppKit puts them back at its own
-/// height, about 4pt higher, at moments with no window notification, such as the first click after
-/// launch, so Home (placed at launch) and every screen after it disagreed. When a button's frame
-/// moves off the top bar's row this asks `WindowButtonAligner` to run again, through the window
-/// notification it already listens to.
-private struct WindowButtonWatch: NSViewRepresentable {
-    var centerY: CGFloat
-
-    func makeNSView(context: Context) -> WatchView {
-        let view = WatchView()
-        view.centerY = centerY
-        return view
-    }
-
-    func updateNSView(_ view: WatchView, context: Context) {
-        view.centerY = centerY
-        view.check()
-    }
-
-    final class WatchView: NSView {
-        var centerY: CGFloat = 0
-        private var observers: [NSObjectProtocol] = []
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            observers.forEach(NotificationCenter.default.removeObserver)
-            observers = []
-            guard let window else { return }
-            let types: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
-            var watched: [NSView] = []
-            for type in types {
-                guard let button = window.standardWindowButton(type) else { continue }
-                watched.append(button)
-                if let container = button.superview, !watched.contains(container) { watched.append(container) }
-            }
-            for view in watched {
-                view.postsFrameChangedNotifications = true
-                observers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: view, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.check() }
-                })
-            }
-            check()
-        }
-
-        func check() {
-            guard let window, !window.styleMask.contains(.fullScreen),
-                  let button = window.standardWindowButton(.closeButton), let container = button.superview else { return }
-            let expected = container.frame.height - centerY - button.frame.height / 2
-            guard abs(button.frame.origin.y - expected) > 0.5 else { return }
-            // After AppKit's layout pass, not during it.
-            DispatchQueue.main.async { [weak window] in
-                guard let window else { return }
-                NotificationCenter.default.post(name: NSWindow.didResizeNotification, object: window)
-            }
-        }
-    }
-}
 
 /// A thin strip on the sidebar's right edge: drag to resize between `Size.sidebarMin` and
 /// `Size.sidebarMax`, double-click to go back to `Size.sidebar`.
@@ -277,13 +268,15 @@ private struct Sidebar: View {
                 ScrollView {
                     // A 2pt gap keeps neighbouring highlights from touching.
                     LazyVStack(alignment: .leading, spacing: Space.s2) {
-                        Text("Courses")
-                            .font(Type.section)
-                            .foregroundStyle(Color.textMuted)
-                            .padding(.horizontal, Space.s8)
-                            .padding(.top, Space.s16)
-                            .padding(.bottom, Space.s4)
-                            .accessibilityAddTraits(.isHeader)
+                        if !model.activeCourses.isEmpty {
+                            Text("Courses")
+                                .font(Type.section)
+                                .foregroundStyle(Color.textMuted)
+                                .padding(.horizontal, Space.s8)
+                                .padding(.top, Space.s16)
+                                .padding(.bottom, Space.s4)
+                                .accessibilityAddTraits(.isHeader)
+                        }
                         if model.courses.isEmpty {
                             courseListState
                                 .padding(.horizontal, Space.s8)
@@ -376,7 +369,8 @@ private struct Sidebar: View {
                 .padding(.horizontal, Space.s16)
                 .padding(.vertical, Space.s4)
         }
-        .padding(.bottom, Space.s4)
+        // The last row ends where the content's bottom corner starts to curve, not beside the curve.
+        .padding(.bottom, Size.frameEdge + Radius.panel)
     }
 
     private func courseRow(_ course: Course) -> some View {
@@ -480,7 +474,7 @@ private struct CourseSidebarRow: View {
                 .frame(width: Size.controlSmall, height: Size.controlSmall)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FocusRingButtonStyle())
         .focusEffectDisabled()
         .padding(.trailing, Space.s4)
         // Only on hover, so a selected row looks the same on every tab: a fill and no chevron.
@@ -595,9 +589,11 @@ private struct SearchFieldButton: View {
             }
             .foregroundStyle(Color.textMuted)
             .padding(.horizontal, Space.s8)
+            .padding(.horizontal, Space.s2)
             .frame(width: 280, height: Size.controlSmall)
-            .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(isHovering ? Color.selected : Color.hover))
-            .contentShape(Rectangle())
+            // Round ends, concentric with the window's corner 10pt away, as toolbar search fields are drawn.
+            .background(Capsule().fill(isHovering ? Color.selected : Color.hover))
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }

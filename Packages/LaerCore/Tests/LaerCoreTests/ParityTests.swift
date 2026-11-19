@@ -283,4 +283,46 @@ private func page(_ items: String, total: Int) -> String {
         #expect(RichText.blocks(fromHTML: "Room change for Thursday.") == [.paragraph([RichRun(text: "Room change for Thursday.")])])
         #expect(RichText.plainText(RichText.blocks(fromHTML: "<p>A</p><p>B</p>")) == "A\n\nB")
     }
+
+    @Test func decorationsKeptAndAuthorColoursDropped() {
+        let html = #"<p><u>under</u> <s>gone</s> <span style="color:#f00;font-size:30px;font-family:Comic Sans">plain</span> "#
+            + #"<span style="font-weight:700;font-style:italic">both</span> <font color="red" size="7">font</font></p>"#
+            + #"<b style="font-weight:normal" id="docs-internal-guid-x"><p>Pasted</p></b>"#
+        let blocks = RichText.blocks(fromHTML: html)
+        #expect(blocks == [
+            .paragraph([
+                RichRun(text: "under", underline: true), RichRun(text: " "),
+                RichRun(text: "gone", strikethrough: true), RichRun(text: " plain "),
+                RichRun(text: "both", bold: true, italic: true), RichRun(text: " font"),
+            ]),
+            .paragraph([RichRun(text: "Pasted")]),
+        ])
+    }
+
+    @Test func tablesAndNumberedListStart() {
+        let html = "<table><tr><th>Week</th><th>Topic</th></tr><tr><td>1</td><td><p>Intro</p><p>Reading</p></td></tr></table>"
+            + "<ol start=\"3\"><li>Three</li><li>Four</li></ol>"
+        #expect(RichText.blocks(fromHTML: html) == [
+            .table(rows: [
+                [RichTableCell(runs: [RichRun(text: "Week")], isHeader: true), RichTableCell(runs: [RichRun(text: "Topic")], isHeader: true)],
+                [RichTableCell(runs: [RichRun(text: "1")]), RichTableCell(runs: [RichRun(text: "Intro"), RichRun(text: "\n"), RichRun(text: "Reading")])],
+            ]),
+            .listItem(ordered: true, number: 3, depth: 0, runs: [RichRun(text: "Three")]),
+            .listItem(ordered: true, number: 4, depth: 0, runs: [RichRun(text: "Four")]),
+        ])
+        #expect(RichText.blocks(fromHTML: "<table><tr><td><b>Layout</b></td></tr></table>") == [.paragraph([RichRun(text: "Layout", bold: true)])])
+    }
+
+    @Test func plainTextKeepsBreaksAndLinksAddresses() {
+        let blocks = RichText.blocks(fromHTML: "Hi all,\nsee https://example.itslearning.com/a today.\n\nThanks &AElig;&aelig;")
+        #expect(blocks == [
+            .paragraph([
+                RichRun(text: "Hi all,\nsee "),
+                RichRun(text: "https://example.itslearning.com/a", link: "https://example.itslearning.com/a"),
+                RichRun(text: " today."),
+            ]),
+            .paragraph([RichRun(text: "Thanks \u{00C6}\u{00E6}")]),
+        ])
+        #expect(RichText.preview(blocks) == "Hi all, see https://example.itslearning.com/a today. Thanks \u{00C6}\u{00E6}")
+    }
 }

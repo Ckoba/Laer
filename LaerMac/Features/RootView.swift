@@ -19,6 +19,7 @@ struct RootView: View {
             }
         }
         .tint(Color.accent)
+        .appliesAppearance()
         #if DEBUG
         // Screenshot tests pick an appearance without changing the system's.
         .preferredColorScheme(Self.testAppearance)
@@ -254,8 +255,7 @@ private struct SchoolField: View {
             .padding(.leading, Space.s12)
             .padding(.trailing, Space.s8)
             .frame(height: Size.control)
-            .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(Color.stage))
-            .overlay(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).strokeBorder(Color.borderStrong, lineWidth: 1))
+            .fieldChrome(focused: isFocused.wrappedValue)
             .onSubmit(onSubmit)
             .accessibilityLabel(label)
     }

@@ -10,7 +10,7 @@ struct BriefSummary: View {
             BriefLabel(title: "No teaching expected")
         } else if let section = note.brief?.summary {
             VStack(alignment: .leading, spacing: Space.s2) {
-                BriefLabel(title: note.isGenerated ? "Brief · made on this Mac" : "Brief")
+                BriefLabel(title: "Brief")
                 Text(BriefMarkdown.text(section.displayText(linkScheme: nil)))
                     .font(Type.t12)
                     .foregroundStyle(Color.text)
@@ -22,28 +22,30 @@ struct BriefSummary: View {
     }
 }
 
-/// The whole brief, in the note's order. Links to readings open in the viewer.
+/// The brief on a plan: its first section (the summary) in view, the rest folded behind "Brief".
+/// Links to readings open in the viewer.
 struct BriefBlock: View {
-    @Environment(AppModel.self) private var model
     let note: LectureNote
+    @State private var showsRest = false
+
+    private var sections: [BriefSection] {
+        (note.brief?.sections ?? []).filter { $0.kind != .lead }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s8) {
-            BriefLabel(title: note.status == .noTeaching ? "Brief · No teaching expected" : note.isGenerated ? "Brief · made on this Mac" : "Brief")
-            ForEach(note.brief?.sections ?? []) { section in
-                VStack(alignment: .leading, spacing: Space.s2) {
-                    if let title = section.title {
-                        Text(title)
-                            .font(Type.t12)
-                            .foregroundStyle(Color.textMuted)
-                            .accessibilityAddTraits(.isHeader)
+            if note.status == .noTeaching {
+                BriefLabel(title: "No teaching expected")
+            }
+            if let first = sections.first {
+                sectionView(first, showsTitle: false)
+                let rest = sections.dropFirst()
+                if !rest.isEmpty {
+                    Disclosure(title: "Brief", isExpanded: $showsRest)
+                        .padding(.horizontal, -Space.s8)
+                    if showsRest {
+                        ForEach(Array(rest)) { sectionView($0, showsTitle: true) }
                     }
-                    Text(BriefMarkdown.text(section.displayText(linkScheme: AppModel.noteLinkScheme)))
-                        .font(Type.body)
-                        .lineSpacing(Type.bodyLineSpacing)
-                        .foregroundStyle(section.kind == .lead ? Color.textMuted : Color.text)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -53,6 +55,25 @@ struct BriefBlock: View {
             if url.scheme == AppModel.noteLinkScheme { return .discarded }
             return .systemAction
         })
+    }
+
+    private func sectionView(_ section: BriefSection, showsTitle: Bool) -> some View {
+        VStack(alignment: .leading, spacing: Space.s2) {
+            if showsTitle, let title = section.title {
+                Text(title)
+                    .font(Type.t12)
+                    .foregroundStyle(Color.textMuted)
+                    .accessibilityAddTraits(.isHeader)
+            }
+            Text(BriefMarkdown.text(section.displayText(linkScheme: AppModel.noteLinkScheme)))
+                .font(Type.body)
+                .lineSpacing(Type.bodyLineSpacing)
+                .foregroundStyle(Color.text)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .readingWidth()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

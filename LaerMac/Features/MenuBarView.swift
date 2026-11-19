@@ -74,6 +74,7 @@ struct MenuBarView: View {
                     HStack(spacing: Space.s4) {
                         ForEach(model.studyLinks) { link in
                             LinkIconButton(symbol: link.icon, label: link.title) { model.open(link) }
+                                .help(link.title)
                         }
                     }
                 }
@@ -118,11 +119,14 @@ private struct MenuLectureCard: View {
     let openReading: (PlanPreview.Element) -> Void
     @State private var isHovering = false
 
+    /// Concentric with the panel: its corner radius less the cards' inset from the panel's edge.
+    private static let radius = Radius.panel - Space.s8
+
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Radius.l, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
         VStack(alignment: .leading, spacing: 0) {
             Button(action: openLecture) { summary }
-                .buttonStyle(.plain)
+                .buttonStyle(FocusRingButtonStyle(cornerRadius: Self.radius))
                 .focusEffectDisabled()
                 .onHover { isHovering = $0 }
             if !lecture.readings.isEmpty {
@@ -145,27 +149,32 @@ private struct MenuLectureCard: View {
     }
 
     private var summary: some View {
-        VStack(alignment: .leading, spacing: Space.s6) {
-            HStack(spacing: Space.s6) {
-                Image(systemName: Symbol.course)
-                    .font(.system(size: 12, weight: .regular))
-                    .accessibilityHidden(true)
-                Text(lecture.course.shortTitle).lineLimit(1)
-                Spacer(minLength: Space.s8)
-                if let start = lecture.start {
-                    Text(Self.when(start))
+        VStack(alignment: .leading, spacing: Space.s2) {
+            HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
+                Text(lecture.plan.name ?? "Untitled plan")
+                    .font(Type.t15)
+                    .foregroundStyle(Color.text)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let when = Self.when(lecture) {
+                    Text(when)
+                        .font(Type.t12.weight(.regular))
+                        .foregroundStyle(Color.textMuted)
                         .monospacedDigit()
                         .lineLimit(1)
+                        .fixedSize()
                 }
             }
-            .font(Type.t12)
+            HStack(spacing: Space.s6) {
+                Circle()
+                    .fill(Color.course(lecture.course.courseId))
+                    .frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
+                Text(lecture.course.shortTitle).lineLimit(1)
+            }
+            .font(Type.t12.weight(.regular))
             .foregroundStyle(Color.textMuted)
-            Text(lecture.plan.name ?? "Untitled plan")
-                .font(Type.t15)
-                .foregroundStyle(Color.text)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, Space.s12)
         .padding(.top, Space.s12)
@@ -189,18 +198,26 @@ private struct MenuLectureCard: View {
             .padding(.vertical, Space.s6)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FocusRingButtonStyle())
         .focusEffectDisabled()
         .accessibilityLabel(isExpanded ? "Hide readings" : "Show readings")
     }
 
-    /// "Today 10:15", "Tomorrow 08:00" or "Thu 20 Nov 10:15", in the person's locale.
-    private static func when(_ date: Date) -> String {
+    /// A plan of a day or less: when it starts, as lists say it ("Today 10:15 AM"). A week-long plan
+    /// is "This week" while it runs, else its range. A start at midnight has no time to show.
+    private static func when(_ lecture: UpcomingLecture, now: Date = .now) -> String? {
+        guard let start = lecture.start else { return nil }
         let calendar = Calendar.current
-        let time = date.formatted(.dateTime.hour().minute())
-        if calendar.isDateInToday(date) { return "\(String(localized: "Today")) \(time)" }
-        if calendar.isDateInTomorrow(date) { return "\(String(localized: "Tomorrow")) \(time)" }
-        return date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())
+        let stop = StudyDates.usable(lecture.plan.stop)
+        if let stop, stop.timeIntervalSince(start) > 24 * 3600 {
+            return start <= now && now <= stop
+                ? String(localized: "This week")
+                : StudyDates.weekRange(start, stop)
+        }
+        if calendar.startOfDay(for: start) == start {
+            return start.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
+        }
+        return StudyDates.relative(start, now: now)
     }
 }
 
@@ -229,7 +246,6 @@ struct LectureReadingRow: View {
                     .truncationMode(.middle)
                 Spacer(minLength: Space.s8)
                 status
-                RowTrailing(date: nil, chevron: true)
             }
         }
         .accessibilityElement(children: .combine)
@@ -245,11 +261,7 @@ struct LectureReadingRow: View {
                 .help("Saved on this Mac")
                 .accessibilityLabel("Saved")
         } else if !opensInApp {
-            Image(systemName: Symbol.open)
-                .font(.system(size: 11, weight: .regular))
-                .foregroundStyle(Color.textMuted)
-                .help("Opens on the website")
-                .accessibilityLabel("Opens on the website")
+            WebsiteMark()
         }
     }
 }

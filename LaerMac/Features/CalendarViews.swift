@@ -6,6 +6,10 @@ struct EventList: View {
     let events: [CalendarEvent]
     let state: CollectionState
     var showsLocation = true
+    /// Inside a course: an event named after the course says nothing new, so its location leads.
+    var courseNames: [String] = []
+    /// What clicking an event does, or nil when it opens nothing.
+    var action: (CalendarEvent) -> (() -> Void)? = { _ in nil }
 
     var body: some View {
         FreshnessLine(state: state)
@@ -13,13 +17,14 @@ struct EventList: View {
             EmptyState(state: state, empty: "No events in this period")
         }
         ForEach(days, id: \.day) { group in
-            Text(group.day.formatted(.dateTime.weekday(.wide).day().month(.wide)))
-                .font(Type.t12)
-                .foregroundStyle(Color.textMuted)
-                .padding(.top, Space.s16)
-                .accessibilityAddTraits(.isHeader)
+            SectionHeader(title: group.day.formatted(.dateTime.weekday(.wide).day().month(.wide)))
+                // The header's own 20 pt leads the first group; later groups get 24.
+                .padding(.top, group.day == days.first?.day ? 0 : Space.s4)
+            // Row text starts on the day heading's edge; the rows reach 8pt into the gutter.
             ForEach(group.events) { event in
-                EventRow(event: event, showsLocation: showsLocation)
+                EventRow(event: event, showsLocation: showsLocation, courseNames: courseNames, action: action(event))
+                    .environment(\.rowDividerHidden, event.id == group.events.last?.id)
+                    .padding(.horizontal, -Space.s8)
             }
         }
     }
@@ -37,27 +42,63 @@ struct EventList: View {
 private struct EventRow: View {
     let event: CalendarEvent
     let showsLocation: Bool
+    var courseNames: [String] = []
+    var action: (() -> Void)?
+
+    /// The event's own title, or, when that only repeats the course, its location or "Class".
+    private var title: String {
+        let own = event.title ?? ""
+        let repeatsCourse = courseNames.contains { own.compare($0, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame }
+        guard !courseNames.isEmpty, own.isEmpty || repeatsCourse else {
+            return own.isEmpty ? String(localized: "Untitled event") : own
+        }
+        if let location = event.displayLocation, !location.isEmpty { return location }
+        return String(localized: "Class")
+    }
+
+    /// The location as a second line, unless it is already the title.
+    private var locationLine: String? {
+        guard let location = event.displayLocation, !location.isEmpty, location != title else { return nil }
+        return showsLocation || !courseNames.isEmpty ? location : nil
+    }
 
     var body: some View {
+        if let action {
+            RowButton(action: action) { content }
+                .accessibilityElement(children: .combine)
+        } else {
+            content
+                .plainRow()
+                .accessibilityElement(children: .combine)
+        }
+    }
+
+    private var content: some View {
         HStack(alignment: .firstTextBaseline, spacing: Space.s12) {
-            Text(timeText)
-                .font(Type.t12)
-                .foregroundStyle(Color.textMuted)
-                .monospacedDigit()
-                .frame(width: 96, alignment: .leading)
+            // As wide as the widest range in this locale, so 12-hour times stay on one line
+            // and every title starts at the same edge.
+            ZStack(alignment: .leading) {
+                Text(Self.widestRange).hidden()
+                Text(timeText)
+            }
+            .font(Type.t12)
+            .foregroundStyle(Color.textMuted)
+            .monospacedDigit()
+            .lineLimit(1)
+            .fixedSize()
             VStack(alignment: .leading, spacing: Space.s2) {
-                Text(event.title ?? "Untitled event")
+                Text(title)
                     .font(Type.t13)
                     .foregroundStyle(Color.text)
                     .lineLimit(2)
-                if showsLocation, let location = event.displayLocation, !location.isEmpty {
+                if let location = locationLine {
                     Text(location)
                         .font(Type.t11)
                         .foregroundStyle(Color.textMuted)
                         .lineLimit(1)
                 }
                 if let text = event.eventDescription, !text.isEmpty {
-                    Text(PlainText.from(text))
+                    Text(RichTextCache.preview(text))
                         .font(Type.t12)
                         .foregroundStyle(Color.textMuted)
                         .lineLimit(3)
@@ -65,9 +106,13 @@ private struct EventRow: View {
             }
             Spacer(minLength: 0)
         }
-        .plainRow()
-        .accessibilityElement(children: .combine)
     }
+
+    private static let widestRange: String = {
+        let day = Calendar.current.startOfDay(for: Date())
+        let start = day.addingTimeInterval(22 * 3600 + 45 * 60)
+        return StudyDates.timeRange(start, start.addingTimeInterval(3600))
+    }()
 
     private var timeText: String {
         guard let start = event.fromDate else { return "" }
@@ -90,10 +135,15 @@ enum CalendarWindow {
 /// A course's events for the coming weeks.
 struct CourseCalendarView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
+    private let courseId: Int
     @State private var loader: CollectionLoader<CalendarEvent>
+    private let courseNames: [String]
 
     init(course: Course) {
         let courseId = course.courseId
+        self.courseId = courseId
+        courseNames = [course.shortTitle, course.displayTitle, course.title].compactMap { $0 }
         _loader = State(initialValue: CollectionLoader(key: "course-calendar-\(courseId)", coverage: .recentWindow) { client in
             let start = Calendar.current.startOfDay(for: Date())
             return try await client.courseCalendarEvents(courseId: courseId, from: start, to: start.addingTimeInterval(CalendarWindow.length))
@@ -102,10 +152,17 @@ struct CourseCalendarView: View {
 
     var body: some View {
         PageScroll(spacing: 0, lazy: true) {
-            EventList(events: loader.records, state: loader.state, showsLocation: false)
+            EventList(events: loader.records, state: loader.state, showsLocation: false, courseNames: courseNames) { event in
+                guard let plan = model.plan(for: event, courseId: courseId) else { return nil }
+                return { navigation.open(plan, courseId: courseId) }
+            }
         }
         .dividedRows()
-        .task { await loader.load(using: model) }
+        .task {
+            async let events: Void = loader.load(using: model)
+            async let plans: Void = model.loadPlans(courseId: courseId)
+            _ = await (events, plans)
+        }
         .focusedSceneValue(\.refreshCurrent, RefreshAction { await loader.refresh(using: model) })
     }
 }
@@ -113,6 +170,7 @@ struct CourseCalendarView: View {
 /// The signed-in person's calendar as a week grid, one block per event.
 struct PersonalCalendarView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     @State private var weekStart = Self.defaultWeek()
     @State private var weekMemo = Memo<WeekKey, [ScheduleDay]>()
     @State private var events: [CalendarEvent] = []
@@ -127,7 +185,7 @@ struct PersonalCalendarView: View {
                     if loadedWeek != weekStart { Spinner() }
                     SectionTabs(
                         selection: $mode,
-                        items: CalendarMode.allCases.map { ($0, $0.label(showsWeekend: showsWeekend)) },
+                        items: CalendarMode.allCases.map { ($0, $0.label) },
                         identifier: { "calendar.mode.\($0.rawValue)" }
                     )
                     CalendarNavigation(
@@ -139,9 +197,26 @@ struct PersonalCalendarView: View {
             .padding(.leading, Space.page)
             .padding(.trailing, Space.page)
             .padding(.top, Space.page)
-            WeekGrid(allDays: visibleDays)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
+            if case .event(let id) = navigation.searchTarget?.destination, let hit = navigation.searchTarget {
+                PageScroll {
+                    Button("Show calendar", systemImage: Symbol.back) { navigation.searchTarget = nil }
+                    if let event = events.first(where: { $0.eventId == id }) {
+                        EventRow(event: event, showsLocation: true)
+                            .padding(.horizontal, -Space.s8)
+                    } else {
+                        Text(hit.title).font(Type.t13)
+                        if let date = hit.date { Text(date, style: .date) }
+                        if let detail = hit.detail { Text(detail) }
+                        Text(loadedWeek == weekStart ? "Showing indexed details" : "Loading event…")
+                            .font(Type.t11)
+                            .foregroundStyle(Color.textMuted)
+                    }
+                }
+            } else {
+                WeekGrid(allDays: visibleDays, showsHeader: mode == .week)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .navigationTitle("Calendar")
@@ -149,6 +224,11 @@ struct PersonalCalendarView: View {
             if mode == .day { weekStart = Self.start(of: selectedDay) }
         }
         .task(id: weekStart) { await load() }
+        .task(id: navigation.searchTarget?.id) {
+            guard navigation.searchTarget?.kind == .event, let date = navigation.searchTarget?.date else { return }
+            selectedDay = Calendar.current.startOfDay(for: date)
+            weekStart = Self.start(of: date)
+        }
         .focusedSceneValue(\.refreshCurrent, RefreshAction { await load() })
     }
 
@@ -207,11 +287,6 @@ struct PersonalCalendarView: View {
         }
     }
 
-    /// True when a weekend day has something on and so gets a column of its own.
-    private var showsWeekend: Bool {
-        weekDays.contains { Calendar.current.isDateInWeekend($0.date) && !$0.blocks.isEmpty }
-    }
-
     /// Weekend days appear only when something is on, so the working week gets the width.
     private var visibleDays: [ScheduleDay] {
         let calendar = Calendar.current
@@ -229,20 +304,21 @@ struct PersonalCalendarView: View {
         let start = days.first?.date ?? weekStart
         let end = days.last?.date ?? (Calendar.current.date(byAdding: .day, value: 6, to: weekStart) ?? weekStart)
         if mode == .day { return start.formatted(.dateTime.weekday(.wide).day().month(.wide)) }
-        return StudyDates.weekRange(start, max(end, start))
+        let calendar = Calendar.current
+        if end <= start || calendar.isDate(start, equalTo: end, toGranularity: .month) {
+            return start.formatted(.dateTime.month(.wide).year())
+        }
+        return (start..<end).formatted(.interval.month(.abbreviated).year())
     }
 }
 
 private enum CalendarMode: String, CaseIterable, Identifiable {
     case day, week
     var id: String { rawValue }
-    /// Honest about what the grid shows: Monday to Friday unless a weekend day has an event.
-    func label(showsWeekend: Bool) -> String {
-        self == .day ? "Day" : showsWeekend ? "Week" : "School week"
-    }
+    var label: String { self == .day ? "Day" : "Week" }
 }
 
-/// Previous, Today and Next as one group, on the same neutral track as the segmented control.
+/// Previous, Today and Next as plain buttons with no track, so they don't read as a second segmented control.
 private struct CalendarNavigation: View {
     let isWeek: Bool
     let previous: () -> Void
@@ -264,14 +340,12 @@ private struct CalendarNavigation: View {
                     .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(isHoveringToday ? Color.hover : Color.clear))
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(FocusRingButtonStyle())
             .focusEffectDisabled()
             .onHover { isHoveringToday = $0 }
             .help("Go to today")
             IconButton(Symbol.disclosure, label: isWeek ? "Next week" : "Next day", action: next)
         }
-        .padding(Space.s2)
-        .background(RoundedRectangle(cornerRadius: Radius.m + Space.s2, style: .continuous).fill(Color.accentTint))
         .fixedSize()
     }
 }
@@ -284,12 +358,14 @@ private struct WeekKey: Equatable {
 /// Seven columns of hours with events placed by time. All-day events sit in a strip above.
 private struct WeekGrid: View {
     let allDays: [ScheduleDay]
+    /// The day names row; the single-day view leaves it out, since the page title says the day.
+    var showsHeader = true
     /// Hour rows are sized so the week's events fill the view, within these bounds; the full day scrolls.
-    private let hourHeightRange: ClosedRange<CGFloat> = 40...72
-    private let headerHeight: CGFloat = 32
+    private let hourHeightRange: ClosedRange<CGFloat> = 40...56
+    private var headerHeight: CGFloat { showsHeader ? 32 : 0 }
     private let gutter: CGFloat = 50
-    /// The room after the last column, equal to the leading gutter's visual edge.
-    private let edge: CGFloat = Space.s16
+    /// No room after the last column: rules and hairlines end at its closing border.
+    private let edge: CGFloat = 0
     /// Narrower than this and a block's words break mid-word; the grid scrolls sideways instead.
     private let minColumn: CGFloat = 64
 
@@ -305,11 +381,11 @@ private struct WeekGrid: View {
 
     private var timedBlocks: [ScheduleBlock] { days.flatMap(\.blocks).filter { !isAllDay($0) } }
 
-    /// Minutes after midnight, 30 before the first timed event of the week, or 7:30 when nothing is on.
+    /// Minutes after midnight, 15 before the first timed event of the week, or 7:30 when nothing is on.
     private var scrollMinutes: Int {
         let early = 7 * 60 + 30
         guard let first = timedBlocks.map({ minutes($0.start) }).min() else { return early }
-        return max(first - 30, 0)
+        return max(first - 15, 0)
     }
 
     /// Hours the view should show: first event's lead-in to 30 minutes after the last, at least 8.
@@ -326,12 +402,19 @@ private struct WeekGrid: View {
             let width = max(proxy.size.width, gutter + edge + minColumn * CGFloat(max(days.count, 1)))
             let strip = allDayLayout(width: width)
             // The view's height less the header and all-day lane, shared by `visibleHours` hours.
-            let viewport = proxy.size.height - headerHeight - strip.height - Space.s8
+            let viewport = proxy.size.height - headerHeight - strip.height - Space.s4 - (strip.spans.isEmpty ? 2 : 3)
             let hourHeight = min(max((viewport / CGFloat(visibleHours)).rounded(.down), hourHeightRange.lowerBound), hourHeightRange.upperBound)
             ScrollView(.horizontal) {
                 VStack(spacing: 0) {
-                    header
-                    if !strip.spans.isEmpty { allDayStrip(strip) }
+                    rule
+                    if showsHeader {
+                        header
+                        rule
+                    }
+                    if !strip.spans.isEmpty {
+                        allDayStrip(strip)
+                        rule
+                    }
                     ScrollViewReader { reader in
                         ScrollView(.vertical) {
                             HStack(alignment: .top, spacing: 0) {
@@ -351,7 +434,7 @@ private struct WeekGrid: View {
                             }
                         }
                         // Margins, not padding, so scrolling still leaves the labels whole.
-                        .contentMargins(.top, Space.s8, for: .scrollContent)
+                        .contentMargins(.top, Space.s4, for: .scrollContent)
                         .contentMargins(.bottom, Space.s32, for: .scrollContent)
                         .onAppear { reader.scrollTo("grid.start", anchor: .top) }
                         .onChange(of: scrollMinutes) { _, _ in reader.scrollTo("grid.start", anchor: .top) }
@@ -360,7 +443,7 @@ private struct WeekGrid: View {
                 }
                 // Behind the header, the all-day lane and the hours alike, so the day lines and
                 // today's tint run the columns' full height.
-                .background(alignment: .top) { columnBackdrop }
+                .background(alignment: .top) { columnBackdrop.padding(.top, 1) }
                 .frame(width: width, height: proxy.size.height)
             }
             .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
@@ -386,6 +469,11 @@ private struct WeekGrid: View {
         .accessibilityHidden(true)
     }
 
+    /// A hairline across the whole grid, gutter included.
+    private var rule: some View {
+        Rectangle().fill(Color.border).frame(height: 1).accessibilityHidden(true)
+    }
+
     private var header: some View {
         HStack(spacing: 0) {
             Color.clear.frame(width: gutter, height: 1)
@@ -403,7 +491,8 @@ private struct WeekGrid: View {
                         .frame(minWidth: 22, minHeight: 22)
                         .background(Circle().fill(isToday ? Color.accentFill : Color.clear))
                 }
-                .frame(maxWidth: .infinity, minHeight: headerHeight)
+                .padding(.leading, days.count == 1 ? Space.s8 : 0)
+                .frame(maxWidth: .infinity, minHeight: headerHeight, alignment: days.count == 1 ? .leading : .center)
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityIdentifier("calendar.day.\(Int(day.date.timeIntervalSince1970))")
@@ -453,35 +542,36 @@ private struct WeekGrid: View {
         let spans = allDaySpans
         let rows = (spans.map(\.row).max() ?? 0) + 1
         let column = max(width - gutter - edge, 1) / CGFloat(max(days.count, 1))
-        // 26pt rows; 36pt when some title is too long for one line of its chip.
+        // 30pt rows; 40pt when some title is too long for one line of its chip.
         let wraps = spans.contains { span in
             let chars = (span.block.event.title ?? "").count
             return CGFloat(chars) * 6.5 > column * CGFloat(span.last - span.first + 1) - 16
         }
-        return AllDayLayout(spans: spans, rows: rows, rowHeight: wraps ? 36 : 26)
+        return AllDayLayout(spans: spans, rows: rows, rowHeight: wraps ? 40 : 30)
     }
 
     private func allDayStrip(_ layout: AllDayLayout) -> some View {
         let rowHeight = layout.rowHeight
+        let laneHeight = CGFloat(layout.rows) * rowHeight
         return HStack(alignment: .top, spacing: 0) {
             Text("All day")
                 .font(Type.t11)
                 .foregroundStyle(Color.textMuted)
                 .lineLimit(1)
                 .padding(.trailing, Space.s6)
-                .frame(width: gutter, alignment: .trailing)
+                .frame(width: gutter, height: laneHeight, alignment: .trailing)
             // Measured, so chips match the day columns below exactly.
             GeometryReader { grid in
                 let col = grid.size.width / CGFloat(max(days.count, 1))
                 ForEach(layout.spans) { span in
                     let count = CGFloat(span.last - span.first + 1)
                     EventBlock(block: span.block, compact: true)
-                        .frame(width: max(col * count - Space.s4, 8), height: rowHeight - 2)
-                        .offset(x: col * CGFloat(span.first) + Space.s2, y: CGFloat(span.row) * rowHeight)
+                        .frame(width: max(col * count - Space.s8, 8), height: rowHeight - Space.s4)
+                        .offset(x: col * CGFloat(span.first) + Space.s4, y: CGFloat(span.row) * rowHeight + Space.s2)
                 }
             }
             .frame(maxWidth: .infinity)
-            .frame(height: CGFloat(layout.rows) * rowHeight)
+            .frame(height: laneHeight)
             Color.clear.frame(width: edge, height: 1)
         }
         .padding(.bottom, Space.s2)
@@ -550,12 +640,12 @@ private struct DayColumn: View {
                     let lane = lanes[block.id] ?? (0, 1)
                     // Overlapping events cascade: each later one sits a step right and on top, so
                     // every block keeps most of the column and its words stay whole.
-                    let step = min(Self.cascadeStep, proxy.size.width / CGFloat(lane.count + 1))
+                    let step = min(Self.cascadeStep, (proxy.size.width - Space.s8) / CGFloat(lane.count + 1))
                     let inset = CGFloat(lane.index) * step
                     let blockHeight = max(offset(block.end) - offset(block.start) - 2, 18)
                     EventBlock(block: block, compact: false, height: blockHeight)
-                        .frame(width: max(proxy.size.width - inset - Space.s4, 8), height: blockHeight, alignment: .topLeading)
-                        .offset(x: inset + Space.s2, y: offset(block.start) + 1)
+                        .frame(width: max(proxy.size.width - inset - Space.s8, 8), height: blockHeight, alignment: .topLeading)
+                        .offset(x: inset + Space.s4, y: offset(block.start) + 1)
                 }
             }
             .frame(height: height)
@@ -620,7 +710,14 @@ private struct EventBlock: View {
     private var heading: String { courseName ?? title ?? "Untitled event" }
 
     /// The course's hue, or nil for events with no course.
-    private var tint: Color? { block.event.courseId.map(Color.course) }
+    private var tint: Color? { courseId.map(Color.course) }
+
+    /// The event's course id, or that of the course its title or room names.
+    private var courseId: Int? {
+        if let id = block.event.courseId { return id }
+        let names = [block.event.title, block.event.displayLocation].compactMap { $0 }.map(Course.shortName)
+        return model.courses.first { names.contains($0.shortTitle) }?.courseId
+    }
 
     private var detail: String? {
         guard courseName != nil, let title, title != courseName else { return nil }
@@ -675,23 +772,30 @@ private struct EventBlock: View {
                     }
                 }
             }
-            .padding(.leading, Space.s4 + (tint == nil ? 0 : 3))
+            .padding(.leading, Space.s4 + (tint == nil ? 0 : Self.barInset + 3))
             .padding(.trailing, Space.s4)
             .padding(.vertical, Space.s2)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            // A thin bar inside the block, as in Calendar, rather than an edge that bends round the corner.
             .background(alignment: .leading) {
-                if let tint { Rectangle().fill(tint.opacity(fade)).frame(width: 3) }
+                if let tint {
+                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                        .fill(tint.opacity(fade))
+                        .frame(width: 3)
+                        .padding(.vertical, Self.barInset)
+                        .padding(.leading, Self.barInset)
+                }
             }
             // Opaque, with an edge in the column's colour, so a block on top of another reads as its own.
             .background(shape.fill(tint.map { $0.opacity((scheme == .light ? 0.16 : 0.22) * fade) } ?? Color.accentTint.opacity(fade)))
+            .background(shape.fill(isHovering ? Color.hover : Color.clear))
             .background(shape.fill(Color.stage))
             .clipShape(shape)
             .overlay(shape.strokeBorder(Color.stage, lineWidth: 1))
             .overlay { if isShowingDetails { shape.strokeBorder(tint ?? Color.accent, lineWidth: 2) } }
-            .background(shape.fill(isHovering ? Color.hover : Color.clear))
             .contentShape(shape)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(FocusRingButtonStyle(cornerRadius: Radius.s))
         .focusEffectDisabled()
         .onHover { isHovering = $0 }
         .clipped()
@@ -699,12 +803,19 @@ private struct EventBlock: View {
         .popover(isPresented: $isShowingDetails, arrowEdge: .trailing) {
             EventDetails(event: block.event)
         }
-        .accessibilityLabel([heading, detail, StudyDates.time(block.start)].compactMap { $0 }.joined(separator: ", "))
+        .accessibilityLabel([heading, detail, block.start.formatted(.dateTime.weekday(.wide).day().month()),
+                             block.end > block.start ? StudyDates.timeRange(block.start, block.end) : StudyDates.time(block.start)]
+            .compactMap { $0 }.joined(separator: ", "))
+        .accessibilityHint("Shows details")
     }
+
+    /// Space between the bar and the block's edges.
+    private static let barInset: CGFloat = 2
 }
 
 private struct EventDetails: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     let event: CalendarEvent
 
     /// "Tuesday 18 November, 8:00–9:30 AM", with both days when the event spans two.
@@ -714,6 +825,12 @@ private struct EventDetails: View {
             return "\(start.formatted(day)), \(StudyDates.timeRange(start, end))"
         }
         return "\(start.formatted(day)), \(StudyDates.time(start)) – \(end.formatted(day)), \(StudyDates.time(end))"
+    }
+
+    /// True when the course line would only repeat the title or room.
+    private func repeats(_ course: Course) -> Bool {
+        let known = [course.title, course.shortTitle, course.displayTitle].map { $0.lowercased() }
+        return [event.title, event.displayLocation].compactMap { $0?.lowercased() }.contains { known.contains($0) }
     }
 
     var body: some View {
@@ -732,20 +849,23 @@ private struct EventDetails: View {
                 Text(location).font(Type.t12).foregroundStyle(Color.textMuted)
             }
             if let id = event.courseId, let course = model.courses.first(where: { $0.courseId == id }),
-               course.title != event.title, course.title != event.displayLocation {
+               !repeats(course) {
                 Text(course.title).font(Type.t12).foregroundStyle(Color.textMuted)
             }
             if let text = event.eventDescription, !text.isEmpty {
-                Text(PlainText.from(text))
-                    .font(Type.t12)
-                    .foregroundStyle(Color.text)
-                    .fixedSize(horizontal: false, vertical: true)
+                RichTextView(html: text)
             }
             if let course = event.courseId {
-                TextButton("Open course") { model.selection = .course(course) }
+                // The lesson's own plan when one covers this time, otherwise the course.
+                if let plan = model.plan(for: event, courseId: course) {
+                    TextButton("Open plan") { navigation.open(plan, courseId: course) }
+                } else {
+                    TextButton("Open course") { model.selection = .course(course) }
+                }
             }
         }
         .padding(Space.s12)
         .frame(width: 280, alignment: .leading)
+        .task(id: event.id) { await model.loadPlansIfNeeded(for: event) }
     }
 }

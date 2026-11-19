@@ -41,7 +41,7 @@ struct ViewerSplit<Detail: View>: View {
         if model.viewerIsFull { return total }
         let minimum = min(minPanel, total)
         let maximum = max(minimum, total - snapToFull)
-        return min(max(model.viewerWidth ?? total * 0.58, minimum), maximum)
+        return min(max(model.viewerWidth ?? total * 0.62, minimum), maximum)
     }
 
     private func resizeHandle(total: CGFloat) -> some View {
@@ -59,7 +59,7 @@ struct ViewerSplit<Detail: View>: View {
                     .fill(Color.textFaint)
                     .frame(width: 3, height: 36)
                     .padding(.leading, Space.s2)
-                    .opacity(isOverHandle ? 1 : (model.viewerIsFull ? 0 : 0.75))
+                    .opacity(isOverHandle ? 1 : 0)
                     .allowsHitTesting(false)
             }
             .contentShape(Rectangle())
@@ -147,6 +147,7 @@ private struct FileTab: View {
     @State private var hoverTask: Task<Void, Never>?
 
     private var isCurrent: Bool { item.id == model.viewerItem?.id }
+    private var hasSiblings: Bool { model.viewerTabs.count > 1 }
 
     var body: some View {
         HStack(spacing: Space.s6) {
@@ -164,17 +165,21 @@ private struct FileTab: View {
             } label: {
                 Image(systemName: Symbol.close)
                     .font(.system(size: 9, weight: .semibold))
-                    .frame(width: 16, height: 16)
+                    .frame(width: hasSiblings ? 16 : 0, height: 16)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            // With one tab the hidden ✕ takes no room, but stays in the accessibility tree.
+            .padding(.leading, hasSiblings ? 0 : -Space.s6)
             .foregroundStyle(Color.textMuted)
-            .opacity(isCurrent || isHovering ? 1 : 0)
+            // With one tab open the reader's own Close is the only ✕; this one stays for assistive tech.
+            .opacity(hasSiblings && (isCurrent || isHovering) ? 1 : 0)
+            .allowsHitTesting(hasSiblings)
             .help("Close tab")
             .accessibilityLabel("Close \(item.title)")
         }
         .padding(.leading, Space.s8)
-        .padding(.trailing, Space.s4)
+        .padding(.trailing, hasSiblings ? Space.s4 : Space.s8)
         .frame(height: 28)
         .background(
             RoundedRectangle(cornerRadius: Radius.l, style: .continuous)
@@ -278,11 +283,12 @@ private struct FileMenu: View {
         panel.nameFieldStringValue = "\(name).\(choices[0].pathExtension)"
         if choices.count > 1 { panel.accessoryView = picker.view }
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        try? FileManager.default.removeItem(at: destination)
         // Turned pages leave the app as they look on screen.
-        if picker.selected.pathExtension.lowercased() == "pdf",
-           let rotated = PDFControllers.rotatedDocument(picker.selected), rotated.write(to: destination) { return }
-        try? FileManager.default.copyItem(at: picker.selected, to: destination)
+        if picker.selected.pathExtension.lowercased() == "pdf", let rotated = PDFControllers.rotatedDocument(picker.selected) {
+            FileExport.write(rotated, to: destination)
+        } else {
+            FileExport.copy(picker.selected, to: destination)
+        }
     }
 }
 
@@ -291,6 +297,13 @@ extension AppModel {
     func shownURL(for item: ViewerItem) -> URL? {
         if slidesShownAsOriginal.contains(item.id) { return item.fileURL }
         return convertedFiles[item.id] ?? item.fileURL
+    }
+
+    /// The PDF page in view for a file the reader has loaded, zero-based, so history can return to it.
+    func viewerPage(for item: ViewerItem) -> Int? {
+        guard let url = shownURL(for: item), let controller = PDFControllers.controller(for: url),
+              controller.pageCount > 0 else { return nil }
+        return controller.pageIndex
     }
 }
 
@@ -374,7 +387,7 @@ private struct FileContent: View {
             if item.isNewTab {
                 NewTabPage()
             } else if let displayURL, displayURL.pathExtension.lowercased() == "pdf" {
-                PDFPanel(url: displayURL, fileId: item.id, startPage: item.startPage, isCurrent: isCurrent)
+                PDFPanel(url: displayURL, fileId: item.id, startPage: item.startPage, searchMatch: item.searchMatch, isCurrent: isCurrent)
                     .id(displayURL)
             } else if let displayURL {
                 QuickLookContent(url: displayURL)
@@ -583,6 +596,18 @@ private final class PDFController {
         view.go(to: page)
     }
 
+    func showSearchMatch(_ text: String?, onPage index: Int) {
+        go(toPage: index)
+        view.highlightedSelections = nil
+        guard let text, !text.isEmpty, let page = view.document?.page(at: index), let contents = page.string else { return }
+        let range = (contents as NSString).range(of: text)
+        guard range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= page.numberOfCharacters,
+              let selection = page.selection(for: range) else { return }
+        selection.color = .systemYellow
+        view.highlightedSelections = [selection]
+        view.go(to: selection)
+    }
+
     private func updatePage() {
         guard let page = view.currentPage, let document = view.document else { return }
         pageIndex = document.index(for: page)
@@ -596,6 +621,7 @@ private final class MonitorHolder {
 private struct PDFPanel: View {
     let url: URL
     let startPage: Int?
+    let searchMatch: String?
     let isCurrent: Bool
     @State private var controller: PDFController
     @AppStorage("viewerPagesLocked") private var isLocked = false
@@ -612,9 +638,10 @@ private struct PDFPanel: View {
     private let closedRegion: CGFloat = 26
     private let openRegion: CGFloat = 184
 
-    init(url: URL, fileId: String, startPage: Int?, isCurrent: Bool) {
+    init(url: URL, fileId: String, startPage: Int?, searchMatch: String?, isCurrent: Bool) {
         self.url = url
         self.startPage = startPage
+        self.searchMatch = searchMatch
         self.isCurrent = isCurrent
         _controller = State(initialValue: PDFController(url: url, fileId: fileId))
     }
@@ -642,13 +669,29 @@ private struct PDFPanel: View {
                             .opacity(isHovering || isOpen ? 1 : 0)
                             .animation(Motion.fast, value: isHovering)
                     }
-                    .padding(.trailing, Space.s12)
+                    // The ticks sit in the page's own 12pt gutter, so nothing is drawn over the page.
+                    .padding(.trailing, 0)
                     .padding(.vertical, Space.s8)
                 }
             }
             .onHover { isHovering = $0 }
             if isLocked {
                 pagesPanel.padding(Space.s8)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("viewer.pdf")
+        .overlay(alignment: .bottomLeading) {
+            if startPage != nil, controller.pageCount > 0 {
+                Text("Page \(controller.pageIndex + 1) of \(controller.pageCount)")
+                    .font(Type.t11)
+                    .padding(.horizontal, Space.s8)
+                    .padding(.vertical, Space.s4)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(Space.s12)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("viewer.pdf.page")
+                    .accessibilityLabel("Page \(controller.pageIndex + 1) of \(controller.pageCount)")
             }
         }
         .background(Color.chrome)
@@ -662,9 +705,10 @@ private struct PDFPanel: View {
         .task {
             await controller.load(url)
             // Always land on a page, so the top gutter is the same whether or not a page was asked for.
-            controller.go(toPage: startPage ?? 0)
+            controller.showSearchMatch(searchMatch, onPage: startPage ?? 0)
         }
-        .onChange(of: startPage) { _, page in controller.go(toPage: page) }
+        .onChange(of: startPage) { _, page in controller.showSearchMatch(searchMatch, onPage: page ?? 0) }
+        .onChange(of: searchMatch) { _, match in controller.showSearchMatch(match, onPage: startPage ?? 0) }
         // Expanding or restoring resizes the page; keep the same page in view.
         .onChange(of: model.viewerIsFull) {
             guard isCurrent else { return }
@@ -759,13 +803,11 @@ private struct PageTicks: View {
             ForEach(0..<shown, id: \.self) { tick in
                 Capsule()
                     .fill(tick == marked ? Color.text : Color.textMuted.opacity(0.5))
-                    .frame(width: tick == marked ? 12 : 8, height: tick == marked ? 2 : 1)
+                    .frame(width: tick == marked ? 10 : 6, height: tick == marked ? 2 : 1)
             }
         }
         .padding(.vertical, Space.s8)
-        .frame(width: 18)
-        // Stays readable over a white page.
-        .background(Color.rail.opacity(0.85), in: Capsule())
+        .frame(width: Space.s12)
         .frame(maxHeight: .infinity)
         .contentShape(Rectangle())
         .help("Page \(current + 1) of \(count)")

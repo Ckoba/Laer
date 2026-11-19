@@ -7,6 +7,7 @@ struct LaerCommands: Commands {
     @FocusedBinding(\.courseTab) private var courseTab
     @FocusedValue(\.refreshCurrent) private var refreshCurrent
     @FocusedValue(\.openPalette) private var openPalette
+    @FocusedValue(\.history) private var history
     @AppStorage(LaerApp.showsMenuBarKey) private var showsMenuBarExtra = true
 
     var body: some Commands {
@@ -28,6 +29,13 @@ struct LaerCommands: Commands {
             Divider()
         }
         CommandMenu("Go") {
+            Button("Back") { history?.back() }
+                .keyboardShortcut("[", modifiers: .command)
+                .disabled(!isReady || history?.canGoBack != true)
+            Button("Forward") { history?.forward() }
+                .keyboardShortcut("]", modifiers: .command)
+                .disabled(!isReady || history?.canGoForward != true)
+            Divider()
             Button("Search…") { openPalette?.run() }
                 .keyboardShortcut("k", modifiers: .command)
                 .disabled(!isReady || openPalette == nil)

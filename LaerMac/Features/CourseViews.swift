@@ -66,15 +66,10 @@ struct CourseDetailView: View {
                     selection: navigation.tabBinding(for: course.courseId),
                     tabs: CourseTab.available(grades: grades.isAvailable(courseId: course.courseId, model: model)))
             }
-            // The same column as every page below it: `Size.contentMax` wide at the page inset,
-            // so "Open in itslearning" sits at the column's trailing edge whether or not the file
-            // viewer is open. The title starts at the page inset, where every other page's title
-            // starts; the course colour dot comes first, inside it.
-            .frame(maxWidth: Size.contentMax, alignment: .leading)
-            .padding(.horizontal, Size.contentInset)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // The same full-width column as the tab content below (`PageScroll`): the title row, the
+            // tab bar and the rows start 24pt from the leading edge and end 24pt from the trailing one.
+            .pageColumn()
             .padding(.top, Space.s24)
-            .padding(.bottom, Space.s4)
             Group {
                 switch navigation.tab(for: course.courseId) {
                 case .updates:
@@ -86,30 +81,22 @@ struct CourseDetailView: View {
                 case .participants: ParticipantsView(course: course)
                 }
             }
+            // One 20pt gap from the tab bar to the first content on every tab.
+            .environment(\.pageTopInset, Space.s16 + Space.s4)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .navigationTitle(course.shortTitle)
-        .focusedSceneValue(\.courseTab, navigation.tabBinding(for: course.courseId))
+        // The open search palette uses ⌘1–6 for its own tabs, so the course tabs step aside.
+        .focusedSceneValue(\.courseTab, navigation.isPaletteOpen ? nil : navigation.tabBinding(for: course.courseId))
         .task { await grades.probe(courseId: course.courseId, using: model) }
     }
 
     /// The course's colour and name, with "Open in itslearning" at the column's trailing edge.
-    /// The control always carries its words and its icon; when the title leaves no room for it
-    /// beside the name, it wraps below the title instead of shrinking to a bare icon.
+    /// The name truncates before the link gives way.
     private var header: some View {
         let url = model.absoluteURL(course.url)
-        return ViewThatFits(in: .horizontal) {
-            PageHeader(title: course.shortTitle, dot: Color.course(course.courseId)) {
-                if let url { WebsiteLink("Open in itslearning") { NSWorkspace.shared.open(url) }.fixedSize() }
-            }
-            VStack(alignment: .leading, spacing: 0) {
-                PageHeader(title: course.shortTitle, dot: Color.course(course.courseId))
-                if let url {
-                    WebsiteLink("Open in itslearning") { NSWorkspace.shared.open(url) }
-                        .fixedSize()
-                        .padding(.bottom, Space.s8)
-                }
-            }
+        return PageHeader(title: course.shortTitle, dot: Color.course(course.courseId)) {
+            if let url { WebsiteLink("Open in itslearning") { NSWorkspace.shared.open(url) }.fixedSize() }
         }
     }
 }
@@ -229,7 +216,7 @@ private struct UpdateRow: View {
     }
 
     var body: some View {
-        DisclosureRow(isExpanded: $isExpanded) {
+        DisclosureRow(isExpanded: $isExpanded, showsChevron: false) {
             HStack(alignment: .center, spacing: Space.s8) {
                 Avatar(name: update.publishedBy?.fullName, imageURL: update.publishedBy?.imageURLString, size: 28)
                 HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
@@ -239,7 +226,7 @@ private struct UpdateRow: View {
                         .lineLimit(1)
                         .layoutPriority(1)
                     if !isExpanded {
-                        Text(RichTextCache.plainText(html))
+                        Text(RichTextCache.preview(html))
                             .font(Type.t13)
                             .foregroundStyle(Color.textMuted)
                             .lineLimit(1)
@@ -256,6 +243,7 @@ private struct UpdateRow: View {
             }
         } children: {
             RichTextView(html: html)
+                .readingWidth()
                 .padding(.horizontal, Space.s8)
         }
         .contextMenu {
@@ -266,18 +254,19 @@ private struct UpdateRow: View {
     }
 }
 
-/// A course's plans: the next lecture as a card on top. Below it, plans group under their topics
-/// when the course has any; otherwise later ones list first and earlier ones collapse.
+/// A course's plans. The current plan leads its topic, in the open topic; below it, plans group
+/// under their topics when the course has any, otherwise later ones list first and earlier ones collapse.
 struct PlansView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     let course: Course
     @State private var showsPrevious = false
-    /// Topic groups the person opened or closed; the others follow `PlanTopicGroup.isCurrent`.
+    /// Topic groups the person opened or closed; the others follow the current plan.
     @State private var topicExpansion: [String: Bool] = [:]
     @State private var memo = Memo<[PlanPreview], PlanSections>()
     @State private var groupMemo = Memo<TopicKey, [PlanTopicGroup]?>()
 
-    /// How far plans sit in from their topic's chevron: the width of the chevron and its gap.
+    /// How far plans sit in from their topic's leading edge: the one chevron column's width and gap.
     private static let topicIndent: CGFloat = 20
 
     private struct TopicKey: Equatable {
@@ -292,23 +281,32 @@ struct PlansView: View {
         let topics = model.topics[course.courseId] ?? []
         let sections = memo.value(for: items) { PlanOrder.sections(items, now: Date()) }
         let groups = groupMemo.value(for: TopicKey(plans: items, topics: topics, minute: currentMinute())) {
-            PlanTopics.groups(items, topics: topics, excluding: sections.next?.planId, now: Date())
+            PlanTopics.groups(items, topics: topics, now: Date())
         }
         PageScroll(spacing: 0, lazy: true) {
             FreshnessLine(state: state)
-            if items.isEmpty {
-                EmptyState(state: state, empty: "No plans")
-            }
-            if let next = sections.next {
-                NextLectureCard(
-                    plan: next, courseId: course.courseId, note: model.lectureNote(for: next, course: course),
-                    topic: groups == nil ? nil : PlanTopics.displayName(of: next, topics: topics)
-                )
-            }
-            if let groups {
-                topicGroups(groups, featured: sections.next)
+            if case .plan(let courseId, let planId) = navigation.searchTarget?.destination, courseId == course.courseId {
+                if let plan = items.first(where: { $0.planId == planId }) {
+                    PageHeader(title: plan.name ?? "Untitled plan")
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("search.plan.\(planId)")
+                    PlanContents(plan: plan, courseId: courseId, note: model.lectureNote(for: plan, course: course))
+                } else {
+                    EmptyState(state: state, empty: "This plan is unavailable")
+                }
             } else {
-                flatSections(sections)
+                if items.isEmpty { EmptyState(state: state, empty: "No plans") }
+                if let groups {
+                    topicGroups(groups, current: sections.next)
+                } else {
+                    if let next = sections.next {
+                        CurrentPlan(
+                            plan: next, courseId: course.courseId, note: model.lectureNote(for: next, course: course)
+                        )
+                        .padding(.bottom, Space.s8)
+                    }
+                    flatSections(sections)
+                }
             }
         }
         .dividedRows()
@@ -320,35 +318,35 @@ struct PlansView: View {
     }
 
     /// Each topic as a group that opens in place, in the course's topic order, then plans without one.
-    @ViewBuilder private func topicGroups(
-        _ groups: [PlanTopicGroup], featured: PlanPreview?
-    ) -> some View {
+    /// The topic holding the current plan is open, with that plan first.
+    @ViewBuilder private func topicGroups(_ groups: [PlanTopicGroup], current: PlanPreview?) -> some View {
         ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+            let holdsCurrent = current.map { next in group.plans.contains { $0.planId == next.planId } } ?? false
             let isExpanded = Binding(
-                get: { topicExpansion[group.id] ?? group.isCurrent },
+                get: { topicExpansion[group.id] ?? holdsCurrent },
                 set: { topicExpansion[group.id] = $0 }
             )
-            let heldHere = group.containsExcludedPlan ? featured : nil
             Disclosure(
-                title: group.name ?? "Other plans", count: group.plans.count + (heldHere == nil ? 0 : 1),
+                title: group.name ?? "Other plans", count: group.plans.count,
                 isExpanded: isExpanded, isTopic: true
             )
             .padding(.horizontal, -Space.s8)
-            .padding(.top, index == 0 && featured == nil ? 0 : Space.s16)
+            .padding(.top, index == 0 ? 0 : Space.s8)
             if isExpanded.wrappedValue {
-                if let heldHere {
-                    Text("\(heldHere.name ?? "Untitled plan") is shown above")
-                        .font(Type.t12)
-                        .foregroundStyle(Color.textMuted)
-                        .lineLimit(1)
-                        .padding(.leading, Self.topicIndent)
-                        .padding(.vertical, Space.s6)
+                // Everything starts under the topic's label, 20pt in from its chevron, so the nesting reads.
+                let lead = holdsCurrent ? current : nil
+                let rest = group.plans.filter { $0.planId != lead?.planId }
+                if let lead {
+                    CurrentPlan(
+                        plan: lead, courseId: course.courseId, note: model.lectureNote(for: lead, course: course)
+                    )
+                    .padding(.leading, Self.topicIndent)
+                    .padding(.bottom, rest.isEmpty ? 0 : Space.s8)
                 }
-                // Plans start under the topic's label, 20pt in from its chevron, so the nesting reads.
-                ForEach(group.plans) { plan in
+                ForEach(rest) { plan in
                     PlanRow(
                         plan: plan, courseId: course.courseId, note: model.lectureNote(for: plan, course: course),
-                        titleFont: .system(size: 15)
+                        isLast: plan.id == rest.last?.id
                     )
                     .padding(.leading, Self.topicIndent - Space.s8)
                     .padding(.trailing, -Space.s8)
@@ -363,14 +361,17 @@ struct PlansView: View {
         if !sections.upcoming.isEmpty {
             PlanSectionHeader(title: "Later", count: sections.upcoming.count, first: sections.next == nil)
             ForEach(sections.upcoming) { plan in
-                PlanRow(plan: plan, courseId: course.courseId, note: model.lectureNote(for: plan, course: course))
-                    .padding(.horizontal, -Space.s8)
+                PlanRow(
+                    plan: plan, courseId: course.courseId, note: model.lectureNote(for: plan, course: course),
+                    isLast: plan.id == sections.upcoming.last?.id
+                )
+                .padding(.horizontal, -Space.s8)
             }
         }
         if !sections.undated.isEmpty {
             PlanSectionHeader(title: "Without dates", count: sections.undated.count, first: sections.next == nil && sections.upcoming.isEmpty)
             ForEach(sections.undated) { plan in
-                PlanRow(plan: plan, courseId: course.courseId, note: nil)
+                PlanRow(plan: plan, courseId: course.courseId, note: nil, isLast: plan.id == sections.undated.last?.id)
                     .padding(.horizontal, -Space.s8)
             }
         }
@@ -380,8 +381,11 @@ struct PlansView: View {
                 .padding(.top, Space.s16)
             if showsPrevious {
                 ForEach(sections.previous) { plan in
-                    PlanRow(plan: plan, courseId: course.courseId, note: model.lectureNote(for: plan, course: course))
-                        .padding(.horizontal, -Space.s8)
+                    PlanRow(
+                        plan: plan, courseId: course.courseId, note: model.lectureNote(for: plan, course: course),
+                        isLast: plan.id == sections.previous.last?.id
+                    )
+                    .padding(.horizontal, -Space.s8)
                 }
             }
         }
@@ -415,9 +419,9 @@ private struct PlanSectionHeader: View {
 /// A row that shows or hides a group, with a count.
 struct Disclosure: View {
     let title: String
-    let count: Int
+    var count: Int? = nil
     @Binding var isExpanded: Bool
-    /// A topic heading over plans: 13pt semibold in the secondary colour, its chevron 14pt wide so the
+    /// A topic heading over plans: a 15pt group header, its chevron 14pt wide so the
     /// plans below can start 20pt in, under its label.
     var isTopic = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -433,9 +437,11 @@ struct Disclosure: View {
                     .frame(width: isTopic ? 14 : Size.iconSmall)
                     .accessibilityHidden(true)
                 Text(title)
-                    .font(isTopic ? Type.t13.weight(.semibold) : Type.t12)
-                    .foregroundStyle(isTopic ? Color.textMuted : Color.text)
-                Text(count.formatted()).font(isTopic ? Type.t12 : Type.t11).monospacedDigit().foregroundStyle(Color.textMuted)
+                    .font(isTopic ? Type.group : Type.t12)
+                    .foregroundStyle(Color.text)
+                if let count {
+                    Text(count.formatted()).font(isTopic ? Type.groupCount : Type.t11).monospacedDigit().foregroundStyle(Color.textMuted)
+                }
                 Spacer(minLength: 0)
             }
         }
@@ -444,14 +450,12 @@ struct Disclosure: View {
     }
 }
 
-/// The next lecture as a large card: when, what, its brief, and its files one click away.
-private struct NextLectureCard: View {
-    @Environment(Navigation.self) private var navigation
+/// The current plan, leading its topic with no card behind it: its title (13pt semibold, under the 15pt topic header) with
+/// its week trailing on the same line, its files 16pt in below it, then its brief.
+private struct CurrentPlan: View {
     let plan: PlanPreview
     let courseId: Int
     let note: LectureNote?
-    /// The plan's topic, shown before the when line. Nil when the course has no topics.
-    var topic: String? = nil
 
     /// True while today falls inside the plan's dates.
     private var isCurrent: Bool {
@@ -461,58 +465,42 @@ private struct NextLectureCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Space.s12) {
-            VStack(alignment: .leading, spacing: Space.s4) {
-                HStack(spacing: Space.s6) {
-                    Image(systemName: Symbol.lecture)
-                        .font(.system(size: 12, weight: .regular))
-                        .accessibilityHidden(true)
-                    if let topic {
-                        Text(topic).lineLimit(1).layoutPriority(-1)
-                        Text("·")
-                    }
-                    Text(isCurrent ? "This week" : "Next")
-                    Text("·")
-                    Text(plan.rangeText)
-                }
-                .font(Type.t12)
-                .foregroundStyle(Color.textMuted)
+        VStack(alignment: .leading, spacing: Space.s8) {
+            HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                 Text(plan.name ?? "Untitled plan")
-                    .font(Type.t18)
+                    .font(Type.t13.weight(.semibold))
                     .foregroundStyle(Color.text)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(2)
                     .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: Space.s8)
+                Text(isCurrent ? "This week" : plan.rangeText)
+                    .font(Type.t12)
+                    .foregroundStyle(Color.textMuted)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize()
             }
             if let text = plan.planDescription, !text.isEmpty {
                 RichTextView(html: text)
+                    .readingWidth()
+            }
+            if let elements = plan.elements, !elements.isEmpty {
+                // Rows carry their own 8pt, so 8 more puts the files' icons 16pt in from the title.
+                VStack(alignment: .leading, spacing: Space.s2) {
+                    ForEach(elements) { element in
+                        PlanElementRow(element: element, courseId: courseId)
+                            .accessibilityIdentifier("plan.resource.\(element.id)")
+                    }
+                }
+                .undividedRows()
+                .padding(.leading, Space.s8)
+                .padding(.trailing, -Space.s8)
             }
             if let note, note.brief != nil || note.status == .noTeaching {
                 BriefBlock(note: note)
             }
-            if let elements = plan.elements, !elements.isEmpty {
-                VStack(alignment: .leading, spacing: Space.s2) {
-                    HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
-                        Text("Materials for this lesson")
-                            .font(Type.t12)
-                            .foregroundStyle(Color.textMuted)
-                            .accessibilityAddTraits(.isHeader)
-                        InlineLink("All course files") { navigation.tabBinding(for: courseId).wrappedValue = .materials }
-                        Spacer(minLength: 0)
-                    }
-                    VStack(alignment: .leading, spacing: Space.s2) {
-                        ForEach(elements) { element in
-                            PlanElementRow(element: element, courseId: courseId)
-                        }
-                    }
-                    .undividedRows()
-                    .environment(\.rowSurface, .raised)
-                    .padding(.horizontal, -Space.s8)
-                }
-            }
         }
-        .padding(Space.s16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: Radius.l, style: .continuous).fill(Color.raised))
         .accessibilityElement(children: .contain)
     }
 }
@@ -524,8 +512,8 @@ private struct PlanRow: View {
     let plan: PlanPreview
     let courseId: Int
     let note: LectureNote?
-    /// 13pt in a flat list; plans under a topic use the larger 15pt regular.
-    var titleFont: Font = Type.t13
+    /// The last row of its group draws no hairline.
+    var isLast = false
     @State private var isExpanded = false
 
     var body: some View {
@@ -534,46 +522,21 @@ private struct PlanRow: View {
             RowButton(action: { withMotion(Motion.base, reduceMotion: reduceMotion) { isExpanded.toggle() } }) {
                 HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                     Text(plan.name ?? "Untitled plan")
-                        .font(titleFont)
+                        .font(Type.t13)
                         .foregroundStyle(Color.text)
                         .lineLimit(2)
                     Spacer(minLength: Space.s8)
                     indicators
-                    // The chevron turns to point down while the row is open.
-                    HStack(spacing: Space.s8) {
-                        RowTrailing(date: range, chevron: !isExpanded)
-                        if isExpanded {
-                            Image(systemName: Symbol.disclosure)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(Color.textFaint)
-                                .rotationEffect(.degrees(90))
-                                .accessibilityHidden(true)
-                        }
-                    }
+                    RowTrailing(date: range)
                 }
             }
-            .environment(\.rowDividerHidden, isExpanded)
+            .environment(\.rowDividerHidden, isExpanded || isLast)
+            .accessibilityIdentifier("plan.row.\(plan.planId)")
             .accessibilityAddTraits(isExpanded ? .isSelected : [])
             if isExpanded {
-                VStack(alignment: .leading, spacing: Space.s2) {
-                    if let text = plan.planDescription, !text.isEmpty {
-                        RichTextView(html: text)
-                            .padding(.horizontal, Space.s8)
-                            .padding(.bottom, Space.s4)
-                    }
-                    if let note, note.brief != nil || note.status == .noTeaching {
-                        BriefBlock(note: note)
-                            .padding(.horizontal, Space.s8)
-                            .padding(.bottom, Space.s4)
-                    }
-                    ForEach(plan.elements ?? []) { element in
-                        PlanElementRow(element: element, courseId: courseId)
-                    }
-                }
-                .undividedRows()
-                .padding(.leading, Space.s16)
-                .padding(.bottom, Space.s8)
-                RowDivider()
+                PlanContents(plan: plan, courseId: courseId, note: note)
+                    .padding(.leading, Space.s16)
+                if !isLast { RowDivider() }
             }
         }
     }
@@ -600,6 +563,34 @@ private struct PlanRow: View {
         }
         .font(Type.t11)
         .foregroundStyle(Color.textMuted)
+    }
+}
+
+private struct PlanContents: View {
+    let plan: PlanPreview
+    let courseId: Int
+    let note: LectureNote?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s2) {
+            if let text = plan.planDescription, !text.isEmpty {
+                RichTextView(html: text)
+                    .readingWidth()
+                    .padding(.horizontal, Space.s8)
+                    .padding(.bottom, Space.s4)
+            }
+            ForEach(plan.elements ?? []) { element in
+                PlanElementRow(element: element, courseId: courseId)
+                    .accessibilityIdentifier("plan.resource.\(element.id)")
+            }
+            if let note, note.brief != nil || note.status == .noTeaching {
+                BriefBlock(note: note)
+                    .padding(.horizontal, Space.s8)
+                    .padding(.top, Space.s8)
+            }
+        }
+        .undividedRows()
+        .padding(.bottom, Space.s8)
     }
 }
 
@@ -642,6 +633,8 @@ private struct PlanElementRow: View {
                     Spinner()
                 } else if case .failed(let message)? = model.downloadStates[resource.id] {
                     ErrorLine(message)
+                } else if isWebsiteOnly {
+                    EmptyView()
                 } else if model.savedAssets[resource.id] != nil {
                     Image(systemName: Symbol.saved)
                         .font(.system(size: 12, weight: .regular))
@@ -649,8 +642,10 @@ private struct PlanElementRow: View {
                         .help("Saved on this Mac")
                         .accessibilityLabel("Saved")
                 }
-                // Every row opens something, so every row carries the chevron, as in Files.
-                RowTrailing(date: nil, chevron: true)
+                // A file opens in the panel with no mark; the website gets its arrow, as in Files.
+                if isWebsiteOnly {
+                    WebsiteMark()
+                }
             }
         }
         .accessibilityElement(children: .combine)
@@ -661,35 +656,71 @@ private struct PlanElementRow: View {
         }
     }
 
+    private var isWebsiteOnly: Bool { !opensInApp || model.downloadStates[resource.id] == .websiteOnly }
+
     private func open() {
-        if opensInApp {
+        if isWebsiteOnly, let url = model.absoluteURL(element.url) {
+            NSWorkspace.shared.open(url)
+        } else if opensInApp {
             isOpening = true
             Task {
                 await model.open(element, courseId: courseId)
                 isOpening = false
             }
-        } else if let url = model.absoluteURL(element.url) {
-            NSWorkspace.shared.open(url)
         }
     }
 }
 
 struct UpcomingView: View {
     @Environment(AppModel.self) private var model
-    @State private var openAssignment: StudyTask?
+    @Environment(Navigation.self) private var navigation
     @State private var onlyActive = true
     @State private var memo = Memo<UpcomingKey, UpcomingSections>()
 
+    /// In `Navigation`, so the open assignment is a history entry.
+    private var openAssignment: StudyTask? {
+        get { navigation.openTask }
+        nonmutating set { navigation.openTask = newValue }
+    }
+
     var body: some View {
-        if let task = openAssignment, let elementId = task.elementId {
-            if task.opensAssignment {
-                AssignmentView(elementId: elementId, title: task.title) { openAssignment = nil }
+        Group {
+            if let task = openAssignment, let elementId = task.elementId {
+                if task.opensAssignment {
+                    AssignmentView(elementId: elementId, title: task.title) { openAssignment = nil }
+                } else {
+                    PageReaderView(resource: task.pageResource(elementId: elementId)) { openAssignment = nil }
+                }
+            } else if case .task(let id) = navigation.searchTarget?.destination {
+                PageScroll {
+                    if let task = model.tasks.first(where: { $0.taskId == id }) {
+                        TaskRow(task: task) { openAssignment = task }
+                    } else {
+                        EmptyState(state: model.tasksState, empty: "This task is unavailable")
+                    }
+                }
             } else {
-                PageReaderView(resource: task.pageResource(elementId: elementId)) { openAssignment = nil }
+                list
             }
-        } else {
-            list
         }
+        // Only for a result just opened from search, never one Back returns to, which keeps its own state.
+        .task(id: navigation.searchArrival) {
+            guard navigation.searchArrival != nil, case .task(let id) = navigation.searchTarget?.destination else { return }
+            // The previously opened assignment must not obscure a new search target.
+            navigation.settle { openAssignment = nil }
+            await model.loadTasks()
+            guard !Task.isCancelled, let task = model.tasks.first(where: { $0.taskId == id }), task.elementId != nil,
+                  task.opensAssignment ? ParityGate.assignments : ParityGate.pages else { return }
+            // Part of opening the result, not a move of its own.
+            navigation.settle { openAssignment = task }
+        }
+    }
+
+    /// `SectionHeader` carries 20pt above its title. The first group sits 20pt under the page
+    /// header (whose own 16pt bottom space plus 4); later groups sit 24pt under the last row's
+    /// text, which already has about 12pt of row padding below it.
+    private static func groupTopAdjustment(isFirst: Bool) -> CGFloat {
+        isFirst ? -Space.s16 : -Space.s8
     }
 
     private var list: some View {
@@ -704,7 +735,7 @@ struct UpcomingView: View {
             ("Overdue", sections.overdue), ("Today", sections.today),
             ("Next 7 days", sections.thisWeek), ("Later", sections.later),
         ]
-        let firstGroup = groups.first { !$0.1.isEmpty }?.0
+        let firstGroup = groups.first { !$0.1.isEmpty }?.0 ?? (sections.noDeadline.isEmpty ? nil : "No deadline")
         // The header scrolls with the list, inside the one page inset, so nothing is reserved
         // between the title and the first heading: the first heading drops its space above.
         return PageScroll(spacing: 0, lazy: true) {
@@ -723,16 +754,13 @@ struct UpcomingView: View {
             ForEach(groups.filter { !$0.1.isEmpty }, id: \.0) { title, tasks in
                 ListGroup(title: title, count: tasks.count) {
                     ForEach(tasks) { task in
-                        // The Overdue section says it once in its heading, so its rows carry only their
-                        // status; an overdue row anywhere else keeps its capsule.
                         TaskRow(
                             task: task,
-                            isOverdue: StudyDates.usable(task.deadline).map { $0 < now } ?? false,
-                            labelsOverdue: title != "Overdue"
+                            isOverdue: StudyDates.usable(task.deadline).map { $0 < now } ?? false
                         ) { openAssignment = task }
                     }
                 }
-                .padding(.top, title == firstGroup ? -(Space.s16 + Space.s4) : 0)
+                .padding(.top, Self.groupTopAdjustment(isFirst: title == firstGroup))
             }
             if !sections.noDeadline.isEmpty {
                 // A plain heading like the others; its rows are always shown.
@@ -741,6 +769,7 @@ struct UpcomingView: View {
                         TaskRow(task: task) { openAssignment = task }
                     }
                 }
+                .padding(.top, Self.groupTopAdjustment(isFirst: firstGroup == "No deadline"))
             }
         }
         .dividedRows()
@@ -754,10 +783,8 @@ struct UpcomingView: View {
 struct TaskRow: View {
     @Environment(AppModel.self) private var model
     let task: StudyTask
+    /// Draws the date in `Color.danger`. There is no "Overdue" word or badge.
     var isOverdue = false
-    /// Says "Overdue" in a capsule beside the date. Off inside the Overdue section, whose
-    /// heading already says it: those rows show only their status.
-    var labelsOverdue = false
     let onOpen: () -> Void
     @State private var action = WriteAction()
 
@@ -790,7 +817,7 @@ struct TaskRow: View {
         let course = model.courses.first(where: { $0.courseId == task.courseId })?.shortTitle ?? task.courseTitle
         ListRow(
             title: task.title,
-            subtitle: course,
+            subtitle: StudyDates.taskSubtitle(course: course, status: task.status),
             subtitleDot: task.courseId.map { Color.course($0) },
             action: opens,
             meta: { meta }
@@ -798,19 +825,16 @@ struct TaskRow: View {
         .contextMenu { menu }
     }
 
-    /// One line, never stacked: [Overdue] [submission state] date [chevron]. The red capsule shows
-    /// whenever the task is overdue, except in the Overdue section, whose heading already says it.
-    /// Only rows that open in the app get a chevron.
+    /// The date on one line, red when overdue. The submission state is on the subtitle line.
+    /// No chevron: rows that open an item show it by hover; rows that leave for the website end in the arrow.
     @ViewBuilder private var meta: some View {
         let deadline = StudyDates.usable(task.deadline)
         let date = deadline.map { StudyDates.relative($0) }
-        let chevron: Bool = { if case .open = primary { return true } else { return false } }()
-        let state = StudyDates.statusText(task.status)
-        if (isOverdue && labelsOverdue) || state != nil || date != nil || chevron {
+        let leavesApp: Bool = { if case .website = primary { return true } else { return false } }()
+        if date != nil || leavesApp {
             HStack(spacing: Space.s8) {
-                if isOverdue, labelsOverdue { StatusCapsule("Overdue", tone: .critical) }
-                if let state { StatusCapsule(state, tone: .neutral) }
-                RowTrailing(date: date, chevron: chevron)
+                RowTrailing(date: date, isOverdue: isOverdue)
+                if leavesApp { WebsiteMark() }
             }
             .help(StudyDates.deadline(task.deadline))
         }

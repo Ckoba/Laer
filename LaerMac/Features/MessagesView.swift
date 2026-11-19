@@ -4,11 +4,17 @@ import SwiftUI
 /// Message threads beside the open conversation.
 struct MessagesView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     @State private var loader = CollectionLoader<MessageThread>(key: "message-threads", coverage: .recentWindow) { client in
         let list = try await client.messageThreads()
         return PagedResult(items: list.threads, isComplete: true)
     }
-    @State private var selectedThread: Int?
+    /// In `Navigation`, so each conversation opened is a history entry.
+    private var selectedThread: Int? {
+        get { navigation.selectedThread }
+        nonmutating set { navigation.selectedThread = newValue }
+    }
+    @State private var searchThread: MessageThread?
     @State private var composingNew = false
 
     var body: some View {
@@ -23,17 +29,32 @@ struct MessagesView: View {
                         await loader.refresh(using: model)
                         selectedThread = threadId
                     }
-                } else if let thread = loader.records.first(where: { $0.threadId == selectedThread }) {
+                } else if let thread = loader.records.first(where: { $0.threadId == selectedThread })
+                            ?? searchThread.flatMap({ $0.threadId == selectedThread ? $0 : nil }) {
                     ThreadView(thread: thread, me: myId) { await loader.refresh(using: model) }
                         .id(thread.threadId)
                 } else {
-                    PageScroll { EmptyLine(loader.records.isEmpty ? "" : "Choose a conversation") }
+                    // Centred in the pane, like Mail with no message selected.
+                    Group {
+                        if selectedThread != nil { EmptyLine("This conversation is unavailable") }
+                        else { EmptyLine(loader.records.isEmpty ? "" : "Choose a conversation") }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.stage)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .navigationTitle("Messages")
         .task { await loader.load(using: model) }
+        .task(id: navigation.searchTarget?.id) {
+            guard case .thread(let id) = navigation.searchTarget?.destination else { return }
+            let store = model.snapshots
+            let saved = await store?.load(MessageThread.self, collection: "search-recent-threads")?.records
+            guard !Task.isCancelled, store === model.snapshots else { return }
+            composingNew = false
+            searchThread = saved?.first { $0.threadId == id }
+        }
         .focusedSceneValue(\.refreshCurrent, RefreshAction { await loader.refresh(using: model) })
     }
 
@@ -58,7 +79,8 @@ struct MessagesView: View {
             }
             .padding(.top, Size.contentInset)
             .padding(.leading, Space.page)
-            .padding(.trailing, Space.s12)
+            // The glyph, not the button's hover square, ends where the rows' times end (12pt in).
+            .padding(.trailing, Space.s6)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     FreshnessLine(state: loader.state)
@@ -72,7 +94,16 @@ struct MessagesView: View {
                             composingNew = false
                             selectedThread = thread.threadId
                         }) {
-                            ThreadRow(thread: thread, isSelected: thread.threadId == selectedThread, me: myId)
+                            ThreadRow(thread: thread, isSelected: thread.threadId == selectedThread, me: myId,
+                                      draft: navigation.replyDrafts[thread.threadId])
+                        }
+                        .overlay(alignment: .bottom) {
+                            // A hairline between rows only, from the text's leading edge.
+                            if thread.id != loader.records.last?.id {
+                                Rectangle().fill(Color.border).frame(height: 1)
+                                    .padding(.leading, Space.s8 + ThreadHeader.gutter + ThreadHeader.dotGap + 28 + Space.s6)
+                                    .padding(.trailing, Space.s8)
+                            }
                         }
                     }
                 }
@@ -87,6 +118,8 @@ private struct ThreadRow: View {
     let thread: MessageThread
     let isSelected: Bool
     let me: Int?
+    /// Unsent reply text, shown in place of the last message, as Mail marks a draft.
+    var draft: String?
 
     var body: some View {
         let who = ThreadText.avatarPerson(thread, me: me)
@@ -96,6 +129,7 @@ private struct ThreadRow: View {
             Circle()
                 .fill(thread.hasUnread ? Color.accent : Color.clear)
                 .frame(width: ThreadHeader.dot, height: ThreadHeader.dot)
+                .frame(width: ThreadHeader.gutter)
                 .accessibilityHidden(true)
             HStack(alignment: .center, spacing: Space.s6) {
                 Avatar(name: who.name, imageURL: who.imageURL, size: 28)
@@ -116,16 +150,26 @@ private struct ThreadRow: View {
                 Spacer(minLength: Space.s4)
                 if let date = thread.lastMessage?.created {
                     Text(ThreadText.listStamp(date))
-                        .font(Type.t11)
-                        .foregroundStyle(thread.hasUnread ? Color.text : Color.textMuted)
+                        .font(Type.t12.weight(.regular))
+                        .foregroundStyle(Color.textMuted)
+                        .monospacedDigit()
                         .lineLimit(1)
                         .fixedSize()
                 }
             }
-            if let preview = ThreadText.preview(thread) {
+            if let draft, !draft.isBlank {
+                HStack(spacing: Space.s4) {
+                    Text("Draft")
+                        .foregroundStyle(Color.danger)
+                    Text(draft.trimmingCharacters(in: .whitespacesAndNewlines))
+                        .foregroundStyle(Color.textMuted)
+                }
+                .font(Type.t12.weight(.regular))
+                .lineLimit(1)
+            } else if let preview = ThreadText.preview(thread) {
                 Text(preview)
-                    .font(Type.t12)
-                    .foregroundStyle(thread.hasUnread ? Color.text : Color.textMuted)
+                    .font(Type.t12.weight(.regular))
+                    .foregroundStyle(Color.textMuted)
                     .lineLimit(1)
             }
         }
@@ -191,9 +235,21 @@ enum ThreadText {
         }
     }
 
+    /// A message's time: the clock time today, else the day as `StudyDates.relative` gives it, with
+    /// the time kept for older messages too.
+    static func messageStamp(_ date: Date, now: Date = .now) -> String {
+        let calendar = Calendar.current
+        if calendar.isDate(date, inSameDayAs: now) { return StudyDates.time(date) }
+        let days = abs(calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: calendar.startOfDay(for: now)).day ?? 0)
+        if days <= 6 { return StudyDates.relative(date, now: now) }
+        return calendar.isDate(date, equalTo: now, toGranularity: .year)
+            ? date.formatted(.dateTime.day().month(.abbreviated).hour().minute())
+            : date.formatted(.dateTime.day().month(.abbreviated).year().hour().minute())
+    }
+
     static func preview(_ thread: MessageThread) -> String? {
         guard let message = thread.lastMessage else { return nil }
-        let text = RichTextCache.plainText(message.text ?? "")
+        let text = RichTextCache.preview(message.text ?? "")
         let body = text.isEmpty ? (message.attachmentName ?? "") : text
         guard !body.isEmpty else { return nil }
         // The sender is obvious in a one-to-one thread; name them only in groups.
@@ -226,10 +282,9 @@ private struct ThreadView: View {
             // share a baseline; smaller than the page title so the conversation does not compete.
             VStack(alignment: .leading, spacing: Space.s2) {
                 Text(ThreadText.title(thread, me: me))
-                    .font(Type.title.weight(.semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Color.text)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(1)
                     .frame(minHeight: Size.pageHeader, alignment: .leading)
                     .accessibilityAddTraits(.isHeader)
                 if let subtitle = ThreadText.subtitle(thread, me: me) {
@@ -240,10 +295,12 @@ private struct ThreadView: View {
                 }
             }
             .padding(.top, Size.contentInset)
-            .padding(.bottom, Space.s16)
+            .padding(.bottom, Space.s12)
             .padding(.horizontal, Space.page)
             .frame(maxWidth: .infinity, alignment: .leading)
+            Rectangle().fill(Color.border).frame(height: 1)
             ScrollViewReader { proxy in
+                GeometryReader { viewport in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         if ParityGate.olderMessages, !pending.isEmpty || isFailed {
@@ -254,24 +311,29 @@ private struct ThreadView: View {
                                 if olderState.phase == .loading { Spinner() }
                                 if case .failed(let message) = olderState.phase { ErrorLine(message) }
                             }
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.bottom, Space.s12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.bottom, Space.s8)
                         }
                         if messages.isEmpty {
                             EmptyLine("No messages in this conversation")
                         }
-                        LazyVStack(alignment: .leading, spacing: Space.s8) {
-                            ForEach(messages) { message in
-                                MessageRow(message: message, imageURL: thread.senderImageURLString(for: message), onChange: onChange)
-                                    .id(message.messageId)
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(MessagePlacement.place(messages, me: me)) { placement in
+                                MessageRow(message: placement.message, placement: placement, isGroup: isGroup,
+                                           imageURL: thread.senderImageURLString(for: placement.message), onChange: onChange)
+                                    .padding(.top, placement.isFirst ? 0 : (placement.startsGroup ? Space.s12 : Space.s2))
+                                    .id(placement.message.messageId)
                             }
                         }
                     }
                     .frame(maxWidth: Size.readingColumn, alignment: .leading)
                     .padding(.horizontal, Space.page)
-                    .padding(.bottom, Space.s16)
-                    // A short thread starts at the top, under the header; the composer stays docked below.
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(.vertical, Space.s16)
+                    // At least the viewport tall and top-aligned: "Earlier messages" is the first thing in
+                    // the content, and a long thread still opens at its newest message.
+                    .frame(maxWidth: .infinity, minHeight: viewport.size.height, alignment: .topLeading)
+                }
+                .defaultScrollAnchor(.bottom)
                 }
                 .frame(maxHeight: .infinity)
                 .onAppear { scrollToNewest(proxy) }
@@ -289,6 +351,9 @@ private struct ThreadView: View {
         .background(Color.stage)
         .task { if ParityGate.olderMessages { await prefetch() } }
     }
+
+    /// More than two people: received messages carry their sender's name and picture.
+    private var isGroup: Bool { (thread.participants?.count ?? 0) > 2 }
 
     private var isFailed: Bool {
         if case .failed = olderState.phase { return true }
@@ -331,24 +396,58 @@ private struct OlderMessagesButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: Space.s6) {
-                Image(systemName: Symbol.lecture)
-                    .font(.system(size: 12, weight: .regular))
-                    .accessibilityHidden(true)
-                Text("Load older messages").font(Type.t12)
-            }
-            .foregroundStyle(isHovering ? Color.text : Color.textMuted)
-            .padding(.horizontal, Space.s8)
-            .frame(height: Size.controlSmall)
-            .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(isHovering ? Color.hover : Color.clear))
-            .contentShape(Rectangle())
+            Text("Earlier messages")
+                .font(Type.t12)
+                .foregroundStyle(Color.accent)
+                .opacity(isHovering ? 0.8 : 1)
+                .frame(height: Size.controlSmall)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .focusEffectDisabled()
         .onHover { isHovering = $0 }
         .disabled(isLoading)
-        .help("Load older messages")
+        .help("Earlier messages")
         .accessibilityLabel("Older messages")
+    }
+}
+
+/// Where a message sits in its thread: whose side, and whether it opens a run of messages from
+/// the same sender. A run breaks when the sender changes or after a quiet gap.
+struct MessagePlacement: Identifiable {
+    let message: InstantMessage
+    /// Sent by the signed-in person. A sender the app cannot identify counts as received.
+    let isMine: Bool
+    let startsGroup: Bool
+    let isFirst: Bool
+
+    var id: Int64 { message.messageId }
+
+    static let groupGap: TimeInterval = 15 * 60
+
+    static func place(_ messages: [InstantMessage], me: Int?) -> [MessagePlacement] {
+        var result: [MessagePlacement] = []
+        var previous: InstantMessage?
+        for message in messages {
+            let isMine = me != nil && message.createdBy == me
+            var starts = true
+            if let previous, previous.isSystemMessage != true, message.isSystemMessage != true,
+               sender(previous) == sender(message) {
+                if let a = previous.created, let b = message.created {
+                    starts = b.timeIntervalSince(a) > groupGap
+                } else {
+                    starts = false
+                }
+            }
+            result.append(MessagePlacement(message: message, isMine: isMine, startsGroup: starts, isFirst: previous == nil))
+            previous = message
+        }
+        return result
+    }
+
+    private static func sender(_ message: InstantMessage) -> String {
+        if let id = message.createdBy { return "id:\(id)" }
+        return "name:\(message.createdByName ?? "")"
     }
 }
 
@@ -356,6 +455,8 @@ private struct MessageRow: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let message: InstantMessage
+    let placement: MessagePlacement
+    let isGroup: Bool
     /// The sender's picture, resolved from the thread's participants.
     let imageURL: String?
     let onChange: () async -> Void
@@ -364,14 +465,172 @@ private struct MessageRow: View {
     @State private var starred: Bool?
     @State private var isHovering = false
 
-    private var isStarred: Bool { starred ?? message.isStarred ?? false }
-    private var showsToolbar: Bool { isHovering && ParityGate.writes && message.isDeleted != true }
+    private static let avatar: CGFloat = 28
+    /// A bubble never takes the whole column, so the two sides stay apart.
+    private static let bubbleWidth: CGFloat = 520
 
-    /// Star and the rest of the actions, over the message's top corner. It stays in the accessibility
-    /// tree and keeps its hit area at rest, so VoiceOver and a click that arrives with the pointer
-    /// reach it; it only fades in visually on hover.
+    private var isMine: Bool { placement.isMine }
+    private var isDeleted: Bool { message.isDeleted == true }
+    private var isStarred: Bool { starred ?? message.isStarred ?? false }
+    private var showsToolbar: Bool { isHovering && ParityGate.writes && !isDeleted }
+    /// Received messages in a group carry the sender's picture beside the run.
+    private var showsAvatarColumn: Bool { isGroup && !isMine }
+    private var tone: RichTextTone { isMine && !isDeleted ? .onAccent : .page }
+    private var ink: Color { tone == .onAccent ? Color(nsColor: RichTextLayout.Colors(.onAccent).text) : Color.text }
+    private var inkMuted: Color { tone == .onAccent ? Color(nsColor: RichTextLayout.Colors(.onAccent).muted) : Color.textMuted }
+
+    private var senderName: String { isMine ? String(localized: "You") : (message.createdByName ?? String(localized: "Unknown sender")) }
+
+    /// What VoiceOver reads for the message: who, when, then the text, so meaning never rests on side or colour.
+    private var spokenLabel: String {
+        var parts = [senderName]
+        if let date = message.created { parts.append(ThreadText.messageStamp(date)) }
+        let head = parts.joined(separator: ", ")
+        var body = isDeleted ? String(localized: "Deleted") : RichTextCache.preview(message.text ?? "")
+        if body.isEmpty, let name = message.attachmentName { body = name }
+        var label = body.isEmpty ? head : "\(head): \(body)"
+        if isStarred { label += ". " + String(localized: "Starred") }
+        return label
+    }
+
+    var body: some View {
+        if message.isSystemMessage == true {
+            systemLine
+        } else {
+            VStack(alignment: isMine ? .trailing : .leading, spacing: Space.s4) {
+                if placement.startsGroup { header }
+                HStack(alignment: .bottom, spacing: Space.s6) {
+                    if showsAvatarColumn {
+                        // The picture sits once per run, beside its first message.
+                        if placement.startsGroup {
+                            Avatar(name: message.createdByName, imageURL: imageURL, size: Self.avatar)
+                                .accessibilityHidden(true)
+                        } else {
+                            Color.clear.frame(width: Self.avatar, height: 1)
+                        }
+                    }
+                    if isMine {
+                        Spacer(minLength: Space.s32)
+                        toolbar
+                        starMark
+                    }
+                    bubble
+                    if !isMine {
+                        starMark
+                        toolbar
+                        Spacer(minLength: Space.s32)
+                    }
+                }
+                if confirmingDelete {
+                    HStack(spacing: Space.s8) {
+                        Text("Delete this message for everyone in the conversation?")
+                            .font(Type.t12)
+                            .foregroundStyle(Color.text)
+                        ConfirmInPlace(confirmTitle: "Delete", onConfirm: { Task { await delete() } }, onCancel: {
+                            withMotion(Motion.fast, reduceMotion: reduceMotion) { confirmingDelete = false }
+                        })
+                    }
+                }
+                if case .failed(let text) = action.phase { ErrorLine(text) }
+            }
+            .frame(maxWidth: .infinity, alignment: isMine ? .trailing : .leading)
+            .contentShape(Rectangle())
+            .onHover { isHovering = $0 }
+            .contextMenu {
+                if ParityGate.writes, !isDeleted { actions }
+            }
+        }
+    }
+
+    /// The sender (received messages in a group only) and the time, quiet above a run.
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
+            if isGroup, !isMine {
+                Text(senderName)
+                    .font(Type.t12)
+                    .foregroundStyle(Color.textMuted)
+                    .lineLimit(1)
+            }
+            if let date = message.created {
+                Text(ThreadText.messageStamp(date))
+                    .font(Type.t11)
+                    .foregroundStyle(Color.textMuted)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .help(date.formatted(date: .complete, time: .shortened))
+            }
+        }
+        .padding(.leading, showsAvatarColumn ? Self.avatar + Space.s6 + Space.s4 : Space.s4)
+        .padding(.trailing, isMine ? Space.s4 : 0)
+        // VoiceOver hears both in the message's own label.
+        .accessibilityHidden(true)
+    }
+
+    private var bubble: some View {
+        VStack(alignment: .leading, spacing: Space.s6) {
+            if isDeleted {
+                Text("Deleted")
+                    .font(Type.body.italic())
+                    .foregroundStyle(Color.textMuted)
+                    .accessibilityLabel(spokenLabel)
+            } else if let text = message.text, !text.isBlank {
+                RichTextView(html: text, tone: tone, hugsWidth: true)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(spokenLabel)
+            }
+            if let name = message.attachmentName, !name.isEmpty {
+                HStack(spacing: Space.s6) {
+                    Image(systemName: Symbol.material)
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(inkMuted)
+                        .accessibilityHidden(true)
+                    Text(name)
+                        .font(Type.t12)
+                        .foregroundStyle(ink)
+                        .lineLimit(1)
+                    if let url = model.absoluteURL(message.attachmentUrl) {
+                        IconButton(Symbol.open, label: "Open on the website") { NSWorkspace.shared.open(url) }
+                            .foregroundStyle(inkMuted)
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel((message.text ?? "").isBlank ? spokenLabel : name)
+            }
+            if let link = message.link, let url = model.absoluteURL(link) {
+                Link(message.linkTitle.flatMap { $0.isEmpty ? nil : $0 } ?? link, destination: url)
+                    .font(Type.t12)
+                    .foregroundStyle(ink)
+                    .underline()
+            }
+        }
+        .padding(.horizontal, Space.s12)
+        .padding(.vertical, Space.s8)
+        .background {
+            let shape = RoundedRectangle(cornerRadius: Radius.l, style: .continuous)
+            if isDeleted {
+                shape.strokeBorder(Color.border, lineWidth: 1)
+            } else {
+                shape.fill(isMine ? Color.accentFill : Color.raised)
+            }
+        }
+        .frame(maxWidth: Self.bubbleWidth, alignment: isMine ? .trailing : .leading)
+    }
+
+    @ViewBuilder private var starMark: some View {
+        if isStarred {
+            Image(systemName: Symbol.star + ".fill")
+                .font(.system(size: 10, weight: .regular))
+                .foregroundStyle(Color.textMuted)
+                .padding(.bottom, Space.s8)
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// Star and the rest of the actions, beside the bubble on its inner side. It stays in the
+    /// accessibility tree and keeps its hit area at rest, so VoiceOver and a click that arrives with
+    /// the pointer reach it; it only fades in visually on hover.
     @ViewBuilder private var toolbar: some View {
-        if ParityGate.writes, message.isDeleted != true {
+        if ParityGate.writes, !isDeleted {
             HStack(spacing: 0) {
                 IconButton(Symbol.star, label: isStarred ? "Unstar" : "Star") { Task { await toggleStar() } }
                 Menu("Message actions", systemImage: Symbol.more) {
@@ -394,87 +653,14 @@ private struct MessageRow: View {
         }
     }
 
-    /// The sender line, the message and its attachments, beside the sender's picture.
-    private var column: some View {
-        VStack(alignment: .leading, spacing: Space.s4) {
-            HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
-                Text(message.createdByName ?? "Unknown sender")
-                    .font(Type.t13)
-                    .foregroundStyle(Color.text)
-                    .lineLimit(1)
-                    .layoutPriority(1)
-                if let date = message.created {
-                    Text(StudyDates.relative(date))
-                        .font(Type.t11)
-                        .foregroundStyle(Color.textMuted)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                        .fixedSize()
-                        .help(date.formatted(date: .complete, time: .shortened))
-                }
-                Spacer(minLength: Space.s8)
-                // The toolbar takes this spot while the pointer is over the message.
-                if isStarred {
-                    Text("Starred").font(Type.t11).foregroundStyle(Color.textMuted)
-                        .opacity(showsToolbar ? 0 : 1)
-                }
-            }
-            .frame(minHeight: 32)
-            .overlay(alignment: .trailing) { toolbar }
-            if confirmingDelete {
-                HStack(spacing: Space.s8) {
-                    Text("Delete this message for everyone in the conversation?")
-                        .font(Type.t12)
-                        .foregroundStyle(Color.text)
-                    ConfirmInPlace(confirmTitle: "Delete", onConfirm: { Task { await delete() } }, onCancel: {
-                        withMotion(Motion.fast, reduceMotion: reduceMotion) { confirmingDelete = false }
-                    })
-                }
-            }
-            if case .failed(let text) = action.phase { ErrorLine(text) }
-            if message.isDeleted == true {
-                EmptyLine("Deleted")
-            } else if let text = message.text, !text.isEmpty {
-                RichTextView(html: text)
-            }
-            if let name = message.attachmentName, !name.isEmpty {
-                HStack(spacing: Space.s6) {
-                    Image(systemName: Symbol.material)
-                        .font(.system(size: 12, weight: .regular))
-                        .foregroundStyle(Color.textMuted)
-                        .accessibilityHidden(true)
-                    Text(name)
-                        .font(Type.t12)
-                        .foregroundStyle(Color.text)
-                        .lineLimit(1)
-                    if let url = model.absoluteURL(message.attachmentUrl) {
-                        IconButton(Symbol.open, label: "Open on the website") { NSWorkspace.shared.open(url) }
-                    }
-                }
-            }
-            if let link = message.link, let url = model.absoluteURL(link) {
-                Link(message.linkTitle.flatMap { $0.isEmpty ? nil : $0 } ?? link, destination: url)
-                    .font(Type.t12)
-                    .foregroundStyle(Color.text)
-                    .underline()
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: Space.s12) {
-            Avatar(name: message.createdByName, imageURL: imageURL, size: 32)
-            column
-        }
-        .padding(Space.s12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(Color.raised))
-        .contentShape(Rectangle())
-        .onHover { isHovering = $0 }
-        .contextMenu {
-            if ParityGate.writes, message.isDeleted != true { actions }
-        }
+    /// A notice from itslearning itself (someone joined, the thread was renamed): centred, no bubble.
+    private var systemLine: some View {
+        Text(RichTextCache.preview(message.text ?? ""))
+            .font(Type.t12)
+            .foregroundStyle(Color.textMuted)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.vertical, Space.s4)
     }
 
     /// The same actions in the row's menu and its context menu.
@@ -506,17 +692,25 @@ private struct MessageRow: View {
 }
 
 private enum ThreadHeader {
-    /// With the dot's gap this is 12, so a row's avatar (4 + 8 + 12) starts at the page inset.
-    static let dot: CGFloat = 8
+    /// The 6pt unread dot sits in a fixed gutter; with its gap the gutter is 12, so a row's avatar
+    /// (4 + 8 + 12) starts at the page inset.
+    static let dot: CGFloat = 6
+    static let gutter: CGFloat = 8
     static let dotGap: CGFloat = Space.s4
 }
 
 /// The reply field: one line tall, growing to about six; attach and Send share its row.
 private struct ReplyComposer: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     let threadId: Int
     let onSent: () async -> Void
-    @State private var text = ""
+    /// Lives in `Navigation`, keyed by thread, because the view is rebuilt for each conversation.
+    private var text: String {
+        get { navigation.replyDrafts[threadId] ?? "" }
+        nonmutating set { navigation.replyDrafts[threadId] = newValue.isEmpty ? nil : newValue }
+    }
+    private var textBinding: Binding<String> { Binding(get: { text }, set: { text = $0 }) }
     @State private var files: [PickedFile] = []
     @State private var action = WriteAction()
     @State private var pickError: String?
@@ -529,7 +723,7 @@ private struct ReplyComposer: View {
             AttachmentList(files: $files)
             HStack(alignment: .bottom, spacing: Space.s8) {
                 IconButton(Symbol.attach, label: "Attach files") { attach() }
-                TextField("Reply", text: $text, axis: .vertical)
+                TextField("Reply", text: textBinding, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(Type.body)
                     .foregroundStyle(Color.text)
@@ -538,8 +732,7 @@ private struct ReplyComposer: View {
                     .padding(.horizontal, Space.s8)
                     .padding(.vertical, Space.s4)
                     .frame(maxWidth: .infinity, minHeight: Size.control, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(Color.stage))
-                    .overlay(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).strokeBorder(Color.borderStrong, lineWidth: 1))
+                    .fieldChrome(focused: focused)
                     .contentShape(Rectangle())
                     .onTapGesture { focused = true }
                     .accessibilityLabel("Reply")

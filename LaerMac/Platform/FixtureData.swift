@@ -20,6 +20,9 @@ struct FixtureTransport: ReadTransport {
         if isSignedOut() {
             return ReadResponse(status: 200, contentType: "text/html", body: Data("<html><form></form></html>".utf8))
         }
+        if request.routeTemplate == "courses/{id}/resources/search/v1" {
+            try await Task.sleep(for: .milliseconds(900))
+        }
         guard let body = Self.body(for: request) else {
             let status = request.routeTemplate == "assignments/{id}/v1" ? 403 : 404
             return ReadResponse(status: status, contentType: "application/json", body: Data("{}".utf8))
@@ -56,6 +59,16 @@ struct FixtureTransport: ReadTransport {
              "LearningObjectId": 9001, "LearningObjectInstanceId": 9101},
             {"ElementId": 703, "ElementType": "LearningToolElement", "Title": "Course page", "Url": "/page/703"}
             """#, count: 3))}
+            """#
+        case "courses/{id}/resources/search/v1":
+            guard request.path.contains("/11/"),
+                  request.query.contains(where: { $0.name == "searchText" && $0.value?.lowercased() == "syllabus" })
+            else { return #"{"Resources": \#(page("", count: 0))}"# }
+            return #"""
+            {"Resources": \#(page(#"""
+            {"ElementId":702,"ElementType":"LearningToolElement","Title":"Syllabus.pdf","CourseId":11,"LearningObjectId":9001},
+            {"ElementId":799,"ElementType":"LearningToolElement","Title":"Fieldwork syllabus.pdf","CourseId":11,"LearningObjectId":9003}
+            """#, count: 2))}
             """#
         case "courses/{id}/folders/{id}/resources/v1":
             return #"""
@@ -105,16 +118,17 @@ enum ParityFixtures {
             {"Threads": {"EntityArray": [
               {"InstantMessageThreadId": 300, "Name": "Group work", "SortIndex": 900, "LastReadInstantMessageId": 10,
                "Participants": [{"PersonId": 2, "FullName": "Sam Teacher", "ProfileImageUrl": "\#(FixtureAvatars.samPath)"}, {"PersonId": 1001, "FullName": "Alex Example"}],
-               "LastMessage": {"MessageId": 12, "Text": "See you on Thursday.", "CreatedByName": "Sam Teacher", "Created": "2026-10-30T10:00:00Z"},
+               "LastMessage": {"MessageId": 12, "Text": "See you on Thursday.", "CreatedBy": 2, "CreatedByName": "Sam Teacher", "Created": "2026-10-30T10:00:00Z"},
                "Messages": {"EntityArray": [\#(FixtureWrites.shared.sentMessagesJSON)
-                 {"MessageId": 12, "Text": "See you on Thursday.", "CreatedByName": "Sam Teacher", "Created": "2026-10-30T10:00:00Z"},
-                 {"MessageId": 11, "Text": "Here is the outline.", "CreatedByName": "Alex Example", "Created": "2026-10-29T15:00:00Z",
+                 {"MessageId": 12, "Text": "See you on Thursday.", "CreatedBy": 2, "CreatedByName": "Sam Teacher", "Created": "2026-10-30T10:00:00Z"},
+                 {"MessageId": 11, "Text": "Here is the outline.", "CreatedBy": 1001, "CreatedByName": "Alex Example", "Created": "2026-10-29T15:00:00Z",
                   "AttachmentName": "outline.pdf", "AttachmentUrl": "/file/11"}
                ], "Total": 2}},
               {"InstantMessageThreadId": 301, "SortIndex": 800, "LastReadInstantMessageId": 20,
                "Participants": [{"PersonId": 3, "FullName": "Robin Example"}],
-               "LastMessage": {"MessageId": 20, "Text": "Thanks", "CreatedByName": "Robin Example", "Created": "2026-10-20T09:00:00Z"}}
-            ], "Total": 2}, "HasMore": false}
+               "LastMessage": {"MessageId": 20, "Text": "Thanks", "CreatedByName": "Robin Example", "Created": "2026-10-20T09:00:00Z"}},
+              \#(FixtureRichText.labThread(id: 302, sortIndex: 700))
+            ], "Total": 3}, "HasMore": false}
             """#
         case "courses/{id}/calendarevents/v1":
             return FixtureTransport.page(#"""
@@ -142,8 +156,10 @@ enum ParityFixtures {
             if request.path.contains("/13/") { return FixtureTransport.page("", count: 0) }
             return FixtureTransport.page(#"""
             {"LightBulletinId": 5, "Text": "<p>Exam moved to <b>Friday</b>.</p>", "Pinned": true, "AllowComments": true,
-             "CommentsCount": 1, "PublishedDate": "2026-10-28T08:00:00Z", "PublishedBy": {"FullName": "Sam Teacher", "ProfileImageUrl": "\#(FixtureAvatars.samPath)"}}
-            """#, count: 1)
+             "CommentsCount": 1, "PublishedDate": "2026-10-28T08:00:00Z", "PublishedBy": {"FullName": "Sam Teacher", "ProfileImageUrl": "\#(FixtureAvatars.samPath)"}},
+            {"LightBulletinId": 4, "Text": "\#(FixtureRichText.announcement)", "AllowComments": false, "CommentsCount": 0,
+             "PublishedDate": "2026-10-26T08:00:00Z", "PublishedBy": {"FullName": "Sam Teacher", "ProfileImageUrl": "\#(FixtureAvatars.samPath)"}}
+            """#, count: 2)
         case "lightbulletins/{id}/comments/v1":
             return FixtureTransport.page(#"""
             {"Id": 76, "CommentText": "Noted", "AllowEditComment": false, "AllowDeleteComment": false,
@@ -198,7 +214,7 @@ extension FixtureTransport: WriteTransport {
         case "instantmessages/v2":
             body = #"""
             {"InstantMessageThreadId": 300, "Name": "Group work", "SortIndex": 901, "LastReadInstantMessageId": 13,
-             "LastMessage": {"MessageId": 13, "Text": "Sent from Laer", "CreatedByName": "Alex Example", "Created": "2026-10-31T09:00:00Z"}}
+             "LastMessage": {"MessageId": 13, "Text": "Sent from Laer", "CreatedBy": 1001, "CreatedByName": "Alex Example", "Created": "2026-10-31T09:00:00Z"}}
             """#
         case "instantmessages/attachment/v1":
             body = #"[{"m_Item1": "00000000-0000-0000-0000-000000000001", "m_Item2": "attachment.pdf"}]"#
@@ -244,7 +260,7 @@ final class FixtureWrites: @unchecked Sendable {
         }
         return texts.enumerated().reversed().map { index, text in
             let quoted = (try? String(decoding: JSONSerialization.data(withJSONObject: [text], options: [.fragmentsAllowed]), as: UTF8.self)) ?? "[\"\"]"
-            return #"{"MessageId": \#(100 + index), "Text": \#(quoted.dropFirst().dropLast()), "CreatedByName": "Alex Example", "Created": "2026-10-31T09:00:00Z"},"#
+            return #"{"MessageId": \#(100 + index), "Text": \#(quoted.dropFirst().dropLast()), "CreatedBy": 1001, "CreatedByName": "Alex Example", "Created": "2026-10-31T09:00:00Z"},"#
         }.joined()
     }
 }
@@ -277,13 +293,18 @@ enum FixtureFiles {
     ]
 
     /// A real three-page PDF, so the viewer's pages and thumbnails have something to show.
-    static func pdf(title: String) -> Data {
+    static func pdf(title: String, scannedPage: Int? = nil) -> Data {
         let data = NSMutableData()
         var box = CGRect(x: 0, y: 0, width: 612, height: 792)
         guard let consumer = CGDataConsumer(data: data),
               let context = CGContext(consumer: consumer, mediaBox: &box, nil) else { return Data() }
         for page in 1...3 {
             context.beginPDFPage(nil)
+            if page == scannedPage, let image = scan(size: box.size) {
+                context.draw(image, in: box)
+                context.endPDFPage()
+                continue
+            }
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
             let text = NSAttributedString(string: "\(title), page \(page)", attributes: [.font: NSFont.systemFont(ofSize: 24)])
@@ -296,6 +317,22 @@ enum FixtureFiles {
         }
         context.closePDF()
         return data as Data
+    }
+
+    private static func scan(size: CGSize) -> CGImage? {
+        guard let bitmap = CGContext(data: nil, width: Int(size.width * 2), height: Int(size.height * 2),
+                                     bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(),
+                                     bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+        bitmap.scaleBy(x: 2, y: 2)
+        bitmap.setFillColor(gray: 1, alpha: 1)
+        bitmap.fill(CGRect(origin: .zero, size: size))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: bitmap, flipped: false)
+        NSAttributedString(string: "Summer field observations", attributes: [
+            .font: NSFont.systemFont(ofSize: 30), .foregroundColor: NSColor.black,
+        ]).draw(at: CGPoint(x: 70, y: size.height - 180))
+        NSGraphicsContext.restoreGraphicsState()
+        return bitmap.makeImage()
     }
 }
 
@@ -393,8 +430,10 @@ enum StressFixtures {
             return FixtureTransport.page(#"""
             {"LightBulletinId": 6, "Text": "<p>\#(longWord) \#(longWord). A long update that runs past one line on any window.</p>", "Pinned": true,
              "AllowComments": true, "CommentsCount": 0, "PublishedDate": "\#(date(days: -1))",
-             "PublishedBy": {"FullName": "Maximilian Alexander Example-Teacher von Longname"}}
-            """#, count: 1)
+             "PublishedBy": {"FullName": "Maximilian Alexander Example-Teacher von Longname"}},
+            {"LightBulletinId": 7, "Text": "\#(FixtureRichText.announcement)", "AllowComments": false, "CommentsCount": 0,
+             "PublishedDate": "\#(date(days: -2))", "PublishedBy": {"FullName": "Sam Teacher"}}
+            """#, count: 2)
         case "calendar/events/v1":
             let week = (0..<5).map { day -> String in
                 #"""
@@ -421,13 +460,50 @@ enum StressFixtures {
                 #"""
                 {"InstantMessageThreadId": \#(400 + index), "Name": "\#(index == 0 ? "A conversation with a very long name about \(longWord)" : "Conversation \(index + 1)")",
                  "SortIndex": \#(2000 - index), "LastReadInstantMessageId": \#(index.isMultiple(of: 3) ? 0 : 5000 + index),
-                 "Participants": [{"PersonId": 3, "FullName": "Robin Example"}],
-                 "LastMessage": {"MessageId": \#(5000 + index), "Text": "\#(longWord) message number \#(index + 1)", "CreatedByName": "Robin Example", "Created": "\#(date(days: Double(-index)))"}}
+                 "Participants": [{"PersonId": 3, "FullName": "Robin Example"}, {"PersonId": 2, "FullName": "Sam Teacher"}, {"PersonId": 1001, "FullName": "Alex Example"}],
+                 "LastMessage": {"MessageId": \#(5000 + index), "Text": "\#(longWord) message number \#(index + 1)", "CreatedBy": 3, "CreatedByName": "Robin Example", "Created": "\#(date(days: Double(-index)))"}\#(index == 0 ? FixtureRichText.groupMessages(last: 5000, at: date(days: -1, hours: 18)) : "")}
                 """#
             }.joined(separator: ",")
             return #"{"Threads": {"EntityArray": [\#(threads)], "Total": 30}, "HasMore": false}"#
         default:
             return nil
         }
+    }
+}
+
+/// Made-up formatted text for the fixtures: an announcement with headings, lists, links and
+/// emphasis, and conversations with messages from both sides. JSON-escaped for the bodies above.
+enum FixtureRichText {
+    static let announcement = #"<h3>Week three</h3><p>Hi all, a few things before <strong>Thursday</strong>:</p>"#
+        + #"<ol><li>Read <em>chapter 4</em> and the <a href=\"https://example.itslearning.com/file/12\">lab notes</a></li>"#
+        + #"<li>Bring the lab sheet<ul><li>Printed, <u>not</u> on a phone</li><li>Signed by your partner</li></ul></li></ol>"#
+        + #"<h4>Hand-in</h4><p style=\"color:#c00;font-size:20px\">The report closes at <b>noon</b>.<br>Late work is marked <s>down</s> as zero.</p>"#
+        + #"<blockquote>Ask in the forum first; most questions are answered there.</blockquote>"#
+
+    /// A one-to-one thread: runs of received and sent messages, with formatting and a link.
+    static func labThread(id: Int, sortIndex: Int) -> String {
+        #"""
+        {"InstantMessageThreadId": \#(id), "Name": "Lab report", "SortIndex": \#(sortIndex), "LastReadInstantMessageId": 34,
+         "Participants": [{"PersonId": 4, "FullName": "Kim Example", "ProfileImageUrl": "\#(FixtureAvatars.kimPath)"}, {"PersonId": 1001, "FullName": "Alex Example"}],
+         "LastMessage": {"MessageId": 34, "Text": "Great, thanks!", "CreatedBy": 4, "CreatedByName": "Kim Example", "Created": "2026-10-27T14:20:00Z"},
+         "Messages": {"EntityArray": [
+           {"MessageId": 34, "Text": "Great, thanks!", "CreatedBy": 4, "CreatedByName": "Kim Example", "Created": "2026-10-27T14:20:00Z"},
+           {"MessageId": 33, "Text": "Done. I also fixed the <b>units</b> in table 2.", "CreatedBy": 1001, "CreatedByName": "Alex Example", "Created": "2026-10-27T14:12:00Z"},
+           {"MessageId": 32, "Text": "Sure, on it now.", "CreatedBy": 1001, "CreatedByName": "Alex Example", "Created": "2026-10-27T14:10:00Z"},
+           {"MessageId": 31, "Text": "<p>Two things left:</p><ul><li>the <i>method</i> section</li><li>the graph labels</li></ul>", "CreatedBy": 4, "CreatedByName": "Kim Example", "Created": "2026-10-27T13:02:00Z"},
+           {"MessageId": 30, "Text": "Hi! Could you check the draft?\nIt's at https://example.itslearning.com/file/30", "CreatedBy": 4, "CreatedByName": "Kim Example", "Created": "2026-10-27T13:00:00Z"}
+         ], "Total": 5}}
+        """#
+    }
+
+    /// Recent messages for a group thread whose last message is `last`, from three people.
+    static func groupMessages(last: Int, at stamp: String) -> String {
+        #"""
+        , "Messages": {"EntityArray": [
+           {"MessageId": \#(last - 1), "Text": "<p>I can take the <b>introduction</b> and the sources.</p>", "CreatedBy": 1001, "CreatedByName": "Alex Example", "Created": "\#(stamp)"},
+           {"MessageId": \#(last - 2), "Text": "<p>Plan for Friday:</p><ol><li>Outline</li><li>Split the sections</li></ol>", "CreatedBy": 2, "CreatedByName": "Sam Teacher", "Created": "\#(stamp)"},
+           {"MessageId": \#(last - 3), "Text": "Morning all", "CreatedBy": 2, "CreatedByName": "Sam Teacher", "Created": "\#(stamp)"}
+         ], "Total": 3}
+        """#
     }
 }

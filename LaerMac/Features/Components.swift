@@ -18,6 +18,7 @@ struct FreshnessLine: View {
     /// The normal state takes no space, so nothing sits above a page's first row.
     private var hasContent: Bool {
         if isQuietRefresh { return false }
+        if case .failed(AppModel.signedOutMessage) = state.phase { return false }
         return state.phase != .idle || state.isIncomplete || isStale
     }
 
@@ -55,6 +56,9 @@ struct EmptyState: View {
         Group {
             switch state.phase {
             case .loading: Spinner()
+            case .failed(AppModel.signedOutMessage):
+                // The session banner says it; show what the list would show with its saved copy.
+                if state.lastSuccess != nil { EmptyLine(empty) }
             case .failed(let message): ErrorLine(message)
             case .idle:
                 if state.lastSuccess != nil {
@@ -90,18 +94,20 @@ struct PageHeader<Trailing: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s2) {
-            HStack(alignment: .center, spacing: Space.s8) {
+            // The trailing link sits on the title's first text baseline, not centred.
+            HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                 if let dot {
                     Circle()
                         .fill(dot)
                         .frame(width: 10, height: 10)
+                        .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 6.5 }
                         .accessibilityHidden(true)
                 }
                 Text(title)
                     .font(Type.title)
                     .foregroundStyle(Color.text)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: Space.s8)
                 trailing()
@@ -138,7 +144,7 @@ struct SessionBanner: View {
             Spacer(minLength: Space.s8)
             TextButton("Sign in", role: .primary) { model.beginSignIn() }
         }
-        .padding(.horizontal, Space.s12)
+        .padding(.horizontal, Size.contentInset)
         .padding(.vertical, Space.s6)
         .background(Color.raised)
         .overlay(alignment: .bottom) { Rectangle().fill(Color.borderStrong).frame(height: 1) }
@@ -151,37 +157,31 @@ struct FieldBox: View {
     let label: String
     @Binding var text: String
     var onSubmit: () -> Void = {}
+    @FocusState private var isFocused: Bool
 
     var body: some View {
         TextField(label, text: $text)
+            .focused($isFocused)
             .textFieldStyle(.plain)
             .font(Type.t13)
             .foregroundStyle(Color.text)
             .padding(.horizontal, Space.s8)
             .frame(height: Size.control)
-            .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(Color.stage))
-            .overlay(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).strokeBorder(Color.borderStrong, lineWidth: 1))
+            .fieldChrome(focused: isFocused)
             .onSubmit(onSubmit)
             .accessibilityLabel(label)
     }
 }
 
-/// A scrolling page on `stage` with the page gutter.
+/// A scrolling page on `stage`. The content fills the pane, `Size.contentInset` from both
+/// edges and leading-aligned; only running prose is capped, with `.readingWidth()`.
 struct PageScroll<Content: View>: View {
     /// 0 for a divided list, where rows meet at their hairlines.
     var spacing: CGFloat = Space.s4
     /// For long lists, so only the rows on screen are built. Forms stay eager, so fields keep focus.
     var lazy = false
-    /// `.reading` caps the column at `Size.readingMax` for lists and reading pages, left-aligned
-    /// at the shared content inset. `.standard` is `Size.contentMax`.
-    var width: Width = .standard
     @ViewBuilder var content: () -> Content
-
-    enum Width {
-        case standard, reading
-
-        var maximum: CGFloat { self == .reading ? Size.readingMax : Size.contentMax }
-    }
+    @Environment(\.pageTopInset) private var topInset
 
     var body: some View {
         ScrollView {
@@ -192,11 +192,25 @@ struct PageScroll<Content: View>: View {
                     VStack(alignment: .leading, spacing: spacing) { content() }
                 }
             }
-            .frame(maxWidth: width.maximum, alignment: .leading)
-            .padding(Size.contentInset)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .pageColumn()
+            .padding(.top, topInset)
+            .padding(.bottom, Size.contentInset)
         }
         .background(Color.stage)
+    }
+}
+
+extension View {
+    /// The page's one column: the whole pane, leading-aligned, `Size.contentInset` from both
+    /// edges. A page header or tab bar above a `PageScroll` uses this too, so its edges match the rows'.
+    func pageColumn() -> some View {
+        frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, Size.contentInset)
+    }
+
+    /// Caps running prose at `Size.readingMax`, leading-aligned. Rows, titles and tabs never use it.
+    func readingWidth() -> some View {
+        frame(maxWidth: Size.readingMax, alignment: .leading)
     }
 }
 
@@ -286,6 +300,11 @@ enum StudyDates {
             : (lower..<upper).formatted(.interval.day().month(.abbreviated).year())
     }
 
+    /// A task's subtitle line: its course, then its submission state ("Biology B · In progress").
+    static func taskSubtitle(course: String?, status: String?) -> String? {
+        [course?.nonEmpty, statusText(status)].compactMap { $0 }.joined(separator: " · ").nonEmpty
+    }
+
     /// A task's status in words. The normal state, not started, shows nothing.
     static func statusText(_ status: String?) -> String? {
         switch status?.lowercased() {
@@ -315,6 +334,8 @@ enum StudyDates {
 extension String {
     /// True when the text is empty or only whitespace and newlines.
     var isBlank: Bool { trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// Nil for an empty string, for optional labels built by joining parts.
+    var nonEmpty: String? { isEmpty ? nil : self }
 }
 
 // MARK: - Avatar

@@ -284,12 +284,15 @@ struct ErrorLine: View {
     init(_ text: String) { self.text = text }
 
     var body: some View {
-        Text(text)
-            .font(Type.t12)
-            .foregroundStyle(Color.danger)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .help(text)
+        // The session banner already asks the person to sign in; one place is enough.
+        if text != AppModel.signedOutMessage {
+            Text(text)
+                .font(Type.t12)
+                .foregroundStyle(Color.danger)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(text)
+        }
     }
 }
 
@@ -560,6 +563,8 @@ extension EnvironmentValues {
     @Entry var rowVerticalPadding: CGFloat? = nil
     /// Set by `ListGroup`: its `ListRow`s draw their hairline.
     @Entry var listGroupActive = false
+    /// The space above a page's first content. A course page sets 20 so every tab starts the same distance under the tab bar.
+    @Entry var pageTopInset: CGFloat = Size.contentInset
 }
 
 // MARK: - List rows and groups
@@ -582,6 +587,9 @@ struct SectionHeader<Trailing: View>: View {
         HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
             titleText
                 .lineLimit(1)
+                // Bold type sits about 1pt inside its frame; pulled back so the heading lines up
+                // with the edge of the avatars and icons under it, not 1pt to their right.
+                .offset(x: -1)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(count.map { "\(title), \($0)" } ?? title)
                 .accessibilityAddTraits(.isHeader)
@@ -605,9 +613,9 @@ extension SectionHeader where Trailing == EmptyView {
     }
 }
 
-/// A small status word in a tinted capsule ("Overdue", "Submitted"): 11pt medium in the tone's
-/// colour on a low-opacity wash of it. At most one per row, placed in `RowTrailing`.
-struct StatusCapsule: View {
+/// A small status word ("Overdue", "Submitted"): 11pt medium in the tone's colour, as Reminders
+/// marks an overdue date, with no tag behind it. At most one per row, placed in `RowTrailing`.
+struct StatusLabel: View {
     enum Tone { case critical, neutral, positive }
 
     private let text: String
@@ -631,24 +639,24 @@ struct StatusCapsule: View {
             .font(Type.t11)
             .foregroundStyle(color)
             .lineLimit(1)
-            .padding(.horizontal, Space.s6)
-            .padding(.vertical, Space.s2)
-            .background(Capsule().fill(color.opacity(0.14)))
             .fixedSize()
     }
 }
 
-/// A `ListRow`'s one trailing column, on one line: [status capsule] date [chevron]. The chevron
+/// A `ListRow`'s one trailing column, on one line: [status] date [chevron]. The chevron
 /// shows only on rows that navigate, after the date and never after the title.
 struct RowTrailing: View {
     private let date: String?
-    private let status: StatusCapsule?
+    private let status: StatusLabel?
     private let chevron: Bool
+    private let isOverdue: Bool
 
-    init(date: String?, status: StatusCapsule? = nil, chevron: Bool = false) {
+    /// `isOverdue` draws the date in `Color.danger`; there is no "Overdue" word or badge.
+    init(date: String?, status: StatusLabel? = nil, chevron: Bool = false, isOverdue: Bool = false) {
         self.date = date
         self.status = status
         self.chevron = chevron
+        self.isOverdue = isOverdue
     }
 
     var body: some View {
@@ -657,7 +665,7 @@ struct RowTrailing: View {
             if let date {
                 Text(date)
                     .font(.system(size: 12))
-                    .foregroundStyle(Color.textMuted)
+                    .foregroundStyle(isOverdue ? Color.danger : Color.textMuted)
                     .monospacedDigit()
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -675,13 +683,24 @@ struct RowTrailing: View {
         }
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
-        // A first baseline even when there is only a chevron or a capsule, so a row can put the
+        // A first baseline even when there is only a chevron or a status, so a row can put the
         // column on its title's first line.
         .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.baselineBelowCenter }
     }
 
     /// How far a 12pt line's baseline sits below its centre.
     static let baselineBelowCenter: CGFloat = 4.5
+}
+
+/// The trailing mark of a row that opens on the website, where other rows have the chevron.
+struct WebsiteMark: View {
+    var body: some View {
+        Image(systemName: Symbol.website)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Color.textFaint)
+            .help("Opens on the website")
+            .accessibilityLabel("Opens on the website")
+    }
 }
 
 /// One row of a list: optional leading accessory, a 13pt title (medium when `emphasised`), an
@@ -856,6 +875,8 @@ struct RowDivider: View {
 /// children sit indented below with no lines of their own.
 struct DisclosureRow<Title: View, Trailing: View, Children: View>: View {
     @Binding var isExpanded: Bool
+    /// Off for rows that open an item in place (an update), where the row's hover says it can be clicked.
+    var showsChevron = true
     @ViewBuilder var title: () -> Title
     @ViewBuilder var trailing: () -> Trailing
     @ViewBuilder var children: () -> Children
@@ -867,11 +888,13 @@ struct DisclosureRow<Title: View, Trailing: View, Children: View>: View {
                 HStack(alignment: .firstTextBaseline, spacing: Space.s8) {
                     HStack(alignment: .firstTextBaseline, spacing: Space.s6) {
                         title()
-                        Image(systemName: Symbol.disclosure)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Color.textMuted)
-                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                            .accessibilityHidden(true)
+                        if showsChevron {
+                            Image(systemName: Symbol.disclosure)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Color.textMuted)
+                                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                                .accessibilityHidden(true)
+                        }
                     }
                     Spacer(minLength: Space.s8)
                     trailing()
@@ -988,5 +1011,48 @@ struct Chip: View {
             }
         }
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+/// The box behind a plain text field: `stage` with a hairline, and the accent edge while it has focus,
+/// since the plain style drops the system focus ring.
+private struct FieldChrome: ViewModifier {
+    let isFocused: Bool
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: Radius.m, style: .continuous)
+        content
+            .background(shape.fill(Color.stage))
+            .overlay(shape.strokeBorder(isFocused ? Color.accent : Color.borderStrong, lineWidth: isFocused ? 2 : 1))
+    }
+}
+
+extension View {
+    func fieldChrome(focused: Bool) -> some View { modifier(FieldChrome(isFocused: focused)) }
+}
+
+/// A plain button that draws the accent ring when it has keyboard focus, for custom shapes that
+/// turn the system focus effect off.
+struct FocusRingButtonStyle: ButtonStyle {
+    var cornerRadius: CGFloat = Radius.m
+
+    func makeBody(configuration: Configuration) -> some View {
+        FocusRing(cornerRadius: cornerRadius) { configuration.label }
+    }
+}
+
+private struct FocusRing<Label: View>: View {
+    @Environment(\.isFocused) private var isFocused
+    let cornerRadius: CGFloat
+    @ViewBuilder let label: () -> Label
+
+    var body: some View {
+        label().overlay {
+            if isFocused {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Color.accent, lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 }

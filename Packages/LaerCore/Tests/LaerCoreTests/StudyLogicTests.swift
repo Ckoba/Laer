@@ -4,12 +4,15 @@ import Testing
 
 private func date(_ text: String) -> Date { APIDate.parse(text)! }
 
-private func plan(_ id: Int, start: String?, stop: String?) -> PlanPreview {
-    let parts: [String] = [
+private func plan(_ id: Int, start: String?, stop: String?, course: Int? = nil, title: String? = nil, url: String? = nil) -> PlanPreview {
+    var parts: [String] = [
         "\"id\":\(id)",
         start.map { "\"start\":\"\($0)\"" } ?? "\"start\":null",
         stop.map { "\"stop\":\"\($0)\"" } ?? "\"stop\":null",
     ]
+    if let course { parts.append("\"courseId\":\(course)") }
+    if let title { parts.append("\"title\":\"\(title)\"") }
+    if let url { parts.append("\"url\":\"\(url)\"") }
     let json = "{\(parts.joined(separator: ","))}"
     let decoder = JSONDecoder()
     decoder.dateDecodingStrategy = APIDate.decoding
@@ -70,6 +73,48 @@ private var utc: Calendar {
         let sections = PlanOrder.sections([plan(1, start: "9999-12-31T00:00:00Z", stop: nil)], now: now)
         #expect(sections.undated.count == 1)
         #expect(sections.next == nil)
+    }
+
+    @Test func matchesEventToShortestContainingPlanInSameCourse() {
+        let weekPlan = plan(
+            10, start: "2030-03-11T00:00:00Z", stop: "2030-03-17T23:59:59Z",
+            course: 42, title: "Week 11 overview", url: "https://example.itslearning.com/plans/10"
+        )
+        let lecturePlan = plan(
+            11, start: "2030-03-12T08:00:00Z", stop: "2030-03-12T10:00:00Z",
+            course: 42, title: "Tuesday seminar", url: "https://example.itslearning.com/plans/11"
+        )
+        let otherCoursePlan = plan(
+            12, start: "2030-03-12T08:00:00Z", stop: "2030-03-12T09:00:00Z",
+            course: 99, title: "Other course", url: "https://example.itslearning.com/plans/12"
+        )
+        let placeholderPlan = plan(13, start: "2030-03-12T00:00:00Z", stop: "9999-12-31T00:00:00Z", course: 42)
+        let plans = [weekPlan, lecturePlan, otherCoursePlan, placeholderPlan]
+
+        let tuesday = CalendarEvent(
+            eventId: 1, title: "Seminar",
+            fromDate: date("2030-03-12T08:15:00Z"), toDate: date("2030-03-12T09:45:00Z"), courseId: 42
+        )
+        #expect(PlanOrder.plan(for: tuesday, in: plans)?.planId == 11)
+
+        let thursday = CalendarEvent(
+            eventId: 2, title: "Workshop",
+            fromDate: date("2030-03-14T13:00:00Z"), toDate: date("2030-03-14T15:00:00Z"), courseId: 42
+        )
+        #expect(PlanOrder.plan(for: thursday, in: plans)?.planId == 10)
+
+        let outside = CalendarEvent(
+            eventId: 3, title: "Next week lecture",
+            fromDate: date("2030-03-19T08:15:00Z"), toDate: date("2030-03-19T09:45:00Z"), courseId: 42
+        )
+        #expect(PlanOrder.plan(for: outside, in: plans) == nil)
+
+        let noCourse = CalendarEvent(
+            eventId: 4, title: "Open day",
+            fromDate: date("2030-03-12T08:15:00Z"), toDate: date("2030-03-12T09:45:00Z"), courseId: nil
+        )
+        #expect(PlanOrder.plan(for: noCourse, in: plans) == nil)
+        #expect(PlanOrder.plan(for: noCourse, in: plans, courseId: 42)?.planId == 11)
     }
 }
 
@@ -156,5 +201,26 @@ private var utc: Calendar {
         index.replace(group: "b", with: [SearchHit(id: "9", kind: .event, title: "Lecture")])
         index.replace(group: "a", with: [])
         #expect(index.count == 1)
+    }
+
+    @Test func preservesDistinctFilesWithTheSameNameAndDeduplicatesByIdentity() {
+        var index = SearchIndex()
+        let first = SearchHit(id: "material-17", kind: .material, title: "Notes.pdf", courseId: 1)
+        let second = SearchHit(id: "material-28", kind: .material, title: "Notes.pdf", courseId: 1)
+        index.replace(group: "plan", with: [first])
+        index.replace(group: "folder", with: [first, second])
+
+        let hits = index.search("notes", scope: .everywhere, activeCourseIds: [])
+        #expect(hits.map(\.id) == [first.id, second.id])
+    }
+
+    @Test func exactTitleWinsAndWordsMayBeSeparatedByNewlines() {
+        var index = SearchIndex()
+        index.replace(group: "a", with: [
+            SearchHit(id: "long", kind: .material, title: "CO2 Measurement Notes"),
+            SearchHit(id: "exact", kind: .plan, title: "CO2 Measurement"),
+        ])
+        let hits = index.search("CO2\nmeasurement", scope: .everywhere, activeCourseIds: [])
+        #expect(hits.map(\.id) == ["exact", "long"])
     }
 }
