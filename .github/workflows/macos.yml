@@ -32,13 +32,10 @@ jobs:
             -onlyUsePackageVersionsFromResolvedFile COMPILER_INDEX_STORE_ENABLE=NO \
             CODE_SIGNING_ALLOWED=NO build | xcbeautify --renderer github-actions
 
-      - name: Test LaerCore
-        run: swift test --package-path Packages/LaerCore --scratch-path "$RUNNER_TEMP/LaerCore"
-
-      - name: Test LaerMac
+      - name: Run headless tests
         run: |
           xcodebuild -project Laer.xcodeproj -scheme Laer -configuration Debug \
             -destination 'platform=macOS,arch=arm64' -derivedDataPath "$RUNNER_TEMP/Laer" \
-            -onlyUsePackageVersionsFromResolvedFile -only-testing:LaerMacTests \
+            -onlyUsePackageVersionsFromResolvedFile -skip-testing:LaerMacUITests \
             COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= \
             test | xcbeautify --renderer github-actions
