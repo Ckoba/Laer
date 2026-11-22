@@ -17,6 +17,37 @@ struct CollectionState: Equatable {
     var isIncomplete = false
 }
 
+private struct AccountStorage: Sendable {
+    struct Cache: Sendable {
+        let courses: Snapshot<Course>?
+        let tasks: Snapshot<StudyTask>?
+        let starred: Snapshot<StoredId>?
+        let assets: [LocalAsset]
+    }
+
+    let snapshots: SnapshotStore
+    let downloads: DownloadStore
+
+    init(root: URL, accountKey: String) {
+        snapshots = SnapshotStore(rootDirectory: root, accountKey: accountKey)
+        downloads = DownloadStore(rootDirectory: root, accountKey: accountKey)
+    }
+
+    func loadCache() async -> Cache {
+        async let assets = downloads.allAssets()
+        let courses = await snapshots.load(Course.self, collection: "courses")
+        let tasks = await snapshots.load(StudyTask.self, collection: "tasks")
+        let starred = await snapshots.load(StoredId.self, collection: "starred")
+        return await Cache(courses: courses, tasks: tasks, starred: starred, assets: assets)
+    }
+}
+
+private struct StartupAccount {
+    let person: Person
+    let storage: AccountStorage
+    let cache: Task<AccountStorage.Cache, Never>
+}
+
 /// UI state and user actions. Networking, storage and refresh rules live in LaerCore.
 @MainActor
 @Observable
@@ -75,17 +106,43 @@ final class AppModel {
         }
     }
     private(set) var viewerTabs: [ViewerItem] = []
+
+    func showFirstPDFPage(_ page: Data, openingID: UUID) {
+        guard let index = viewerTabs.firstIndex(where: { $0.openingID == openingID && $0.fileURL == nil }) else { return }
+        var item = viewerTabs[index]
+        item.firstPDFPage = page
+        if viewerItem?.openingID == openingID {
+            viewerItem = item
+        } else {
+            viewerTabs[index] = item
+        }
+    }
+
     var viewerWidth: CGFloat?
     /// A course whose Plans tab should come forward, set when a file opens from the menu bar.
     var plansTabRequest: Int?
+    var siteLinkRequest: SiteLinkRequest?
     @ObservationIgnored var readingPrefetch: Task<Void, Never>?
+    /// Saved files whose conversion ahead of opening failed, so later refreshes don't retry them.
+    /// Cleared when the file is saved again or removed.
+    @ObservationIgnored var failedConversions: Set<String> = []
+    /// The file row under the pointer and the one link lookup in flight. See `pointer(_:isOver:)`.
+    @ObservationIgnored private var pointedResource: Resource?
+    @ObservationIgnored private var pointerDwell: Task<Void, Never>?
+    @ObservationIgnored private var linkLookup: (resource: Resource, byPointer: Bool, task: Task<Bool, Never>)?
+    /// Unsaved files on screen in an open folder or lesson, looked up after the pointer's row.
+    @ObservationIgnored private var visibleLookups: (place: String, queue: [Resource]) = ("", [])
+
+    static let fetchesAheadKey = "LaerFetchFilesAhead"
+    /// On unless turned off in Settings: links are found and readings saved before a click. Decision 0020.
+    var fetchesAhead: Bool { UserDefaults.standard.object(forKey: Self.fetchesAheadKey) as? Bool ?? true }
     /// Links the person keeps on Home and in the menu bar, such as exam or mail sites. See `AppModel+Home`.
     var studyLinks: [StudyLink] = StudyLink.saved()
     var examPlan = ExamPlanState()
     var viewerIsFull = false
     var convertedFiles: [String: URL] = [:]
-    /// Slide decks the person switched to their original file. The PDF view stays the default.
-    var slidesShownAsOriginal: Set<String> = []
+    /// Office files the person switched to their original view.
+    var officeFilesShownAsOriginal: Set<String> = []
     /// Files opened in the viewer, newest first, for the New tab page. See `AppModel+NewTab`.
     var recentFiles: [RecentFile] = []
     var recentFilesPersonId: Int?
@@ -137,6 +194,8 @@ final class AppModel {
     #endif
     private var didRefreshAfterVerify = false
     private var pollTask: Task<Void, Never>?
+    private var startupSearchTask: Task<Void, Never>?
+    private var backgroundRefreshTask: Task<Void, Never>?
 
     /// Tunable defaults, not documented service limits.
     private let freshnessThreshold: TimeInterval = 5 * 60
@@ -144,6 +203,10 @@ final class AppModel {
 
     private static let siteKey = "selectedSite"
     private static let personKey = "lastPerson"
+
+    #if DEBUG
+    private init(forTesting: ()) {}
+    #endif
 
     init() {
         Perf.begin()
@@ -159,7 +222,14 @@ final class AppModel {
         if let data = defaults.data(forKey: Self.siteKey),
            let saved = try? JSONDecoder().decode(Site.self, from: data) {
             authState = .launching
-            Task { await open(site: saved) }
+            // The main actor may be busy opening the window. Warm the local reads now.
+            let startup = Self.cachedPerson(defaults).map { person in
+                let storage = AccountStorage(root: Self.storageRoot(), accountKey: "\(saved.customerId)-\(person.personId)")
+                let cache = Task.detached(priority: .userInitiated) { await storage.loadCache() }
+                return StartupAccount(person: person, storage: storage, cache: cache)
+            }
+            let keychain = Self.readTokens(for: saved)
+            Task { await open(site: saved, startup: startup, keychainRead: keychain) }
         } else if let preset = defaults.string(forKey: "LaerInstitution") {
             Task { await chooseSite(shortName: preset) }
         }
@@ -212,7 +282,20 @@ final class AppModel {
         }
     }
 
-    private func open(site: Site) async {
+    private static func cachedPerson(_ defaults: UserDefaults) -> Person? {
+        guard let data = defaults.data(forKey: personKey),
+              let person = try? JSONDecoder().decode(Person.self, from: data), person.personId != 0 else { return nil }
+        return person
+    }
+
+    private static func readTokens(for site: Site) -> Task<OAuthTokens?, Never> {
+        let vault = TokenVault(site: site)
+        return Task.detached(priority: .userInitiated) { vault.load() }
+    }
+
+    private func open(
+        site: Site, startup: StartupAccount? = nil, keychainRead: Task<OAuthTokens?, Never>? = nil
+    ) async {
         self.site = site
         let session = WebSession(site: site)
         webSession = session
@@ -230,21 +313,23 @@ final class AppModel {
         }
 
         // Saved content opens first, online or not. Requests wait for the token below.
-        let vault = TokenVault(site: site)
-        let keychain = Task.detached(priority: .userInitiated) { vault.load() }
-        let gate = Task { _ = await keychain.value }
+        let keychain = keychainRead ?? Self.readTokens(for: site)
+        let gate = Task { [weak self] in
+            let tokens = await keychain.value
+            Perf.mark("tokens read")
+            guard let tokens, let self, self.webSession === session else { return }
+            self.useOAuth(tokens, site: site)
+        }
         sessionGate = gate
-        if let data = UserDefaults.standard.data(forKey: Self.personKey),
-           let person = try? JSONDecoder().decode(Person.self, from: data), person.personId != 0 {
-            await enter(person: person, site: site)
+        if let person = startup?.person ?? Self.cachedPerson(.standard) {
+            await enter(person: person, site: site, startup: startup)
         }
         Perf.mark("saved content shown")
         // The Keychain read blocks for a noticeable moment, so it stays off the main thread.
         let tokens = await keychain.value
-        Perf.mark("tokens read")
-        // The token goes in place before any waiting request continues.
-        if let tokens { useOAuth(tokens, site: site) }
+        // The gate installs the token before any waiting request continues.
         await gate.value
+        guard webSession === session else { return }
         sessionGate = nil
         if tokens != nil {
             await verifyOAuthSession(site: site)
@@ -329,6 +414,13 @@ final class AppModel {
                 refresh = nil
                 await enter(person: person, site: site)
             }
+            if let webSession {
+                Task(priority: .utility) {
+                    let revision = webSession.fileSessionRevision
+                    await webSession.prepareFileSession(client: client)
+                    if revision == webSession.fileSessionRevision { FileAcquirer.prepareResolver(for: webSession) }
+                }
+            }
             if refresh == nil {
                 didRefreshAfterVerify = true
                 await refreshAll()
@@ -342,6 +434,7 @@ final class AppModel {
             #endif
         } catch APIError.signedOut {
             log.notice("verify rejected")
+            webSession?.invalidateFileSession()
             TokenVault(site: site).clear()
             tokenBox = nil
             self.bearer = nil
@@ -409,33 +502,43 @@ final class AppModel {
         (try? await ItslearningClient(transport: WebKitTransport(session: session)).sessionIsValid()) == true
     }
 
-    private func enter(person: Person, site: Site) async {
+    private func enter(person: Person, site: Site, startup: StartupAccount? = nil) async {
         // Never show one account's data to another.
         if case .ready(let current) = authState, current.personId != person.personId {
             resetAccountState()
         }
         loadRecentFiles(personId: person.personId)
-        var root = Self.storageRoot()
+        let persistentRoot = Self.storageRoot()
+        var root = persistentRoot
         #if DEBUG
         if let fixtureRoot { root = fixtureRoot }
         #endif
-        if root == Self.storageRoot(), let data = try? JSONEncoder().encode(person) {
+        if root == persistentRoot, let data = try? JSONEncoder().encode(person) {
             UserDefaults.standard.set(data, forKey: Self.personKey)
         }
         let accountKey = "\(site.customerId)-\(person.personId)"
-        snapshots = SnapshotStore(rootDirectory: root, accountKey: accountKey)
-        let store = DownloadStore(rootDirectory: root, accountKey: accountKey)
+        let storage = startup?.storage ?? AccountStorage(root: root, accountKey: accountKey)
+        snapshots = storage.snapshots
+        let store = storage.downloads
         downloads = store
-        await briefs.open(root: root, accountKey: accountKey)
-        // Everything saved loads first, so the first frame is already complete.
-        for asset in await store.allAssets() {
+        async let openBriefs: Void = briefs.open(root: root, accountKey: accountKey)
+        let cache = if let startup { await startup.cache.value } else { await storage.loadCache() }
+        await openBriefs
+        guard store === downloads else { return }
+        applyCachedAccountData(cache)
+        for asset in cache.assets where !asset.id.hasPrefix(Self.messageAttachmentPrefix) {
             savedAssets[asset.id] = asset
         }
-        await loadCachedAccountData()
         Perf.mark("cache loaded")
         authState = .ready(person)
         Perf.mark("ready shown")
         startPolling()
+        startupSearchTask?.cancel()
+        startupSearchTask = Task(priority: .utility) { [weak self] in
+            guard let self, self.downloads === store, !Task.isCancelled else { return }
+            await self.loadSearchIndex()
+            Perf.mark("startup search loaded")
+        }
     }
 
     func retrySignInPage() {
@@ -471,6 +574,7 @@ final class AppModel {
         }
         #endif
         AvatarLoader.shared.reset()
+        webSession?.invalidateFileSession()
         didRefreshAfterVerify = false
         authState = .signingIn
         if let site { Task { await startOAuthSignIn(site: site) } }
@@ -506,6 +610,14 @@ final class AppModel {
 
     private func resetAccountState() {
         AvatarLoader.shared.reset()
+        webSession?.invalidateFileSession()
+        cancelLinkLookups()
+        pointedResource = nil
+        OfficePDFConverter.cancelConversions()
+        backgroundRefreshTask?.cancel()
+        backgroundRefreshTask = nil
+        startupSearchTask?.cancel()
+        startupSearchTask = nil
         courses = []
         coursesState = CollectionState()
         updates = [:]
@@ -524,7 +636,8 @@ final class AppModel {
         selection = .home
         closeViewer()
         convertedFiles = [:]
-        slidesShownAsOriginal = []
+        failedConversions = []
+        officeFilesShownAsOriginal = []
         recentFiles = []
         recentFilesPersonId = nil
         starredIds = []
@@ -579,21 +692,19 @@ final class AppModel {
 
     // MARK: - Refresh
 
-    private func loadCachedAccountData() async {
-        guard let snapshots else { return }
-        if let snapshot = await snapshots.load(Course.self, collection: "courses") {
+    private func applyCachedAccountData(_ cache: AccountStorage.Cache) {
+        if let snapshot = cache.courses {
             courses = snapshot.records
             coursesState.lastSuccess = snapshot.lastSuccess
             coursesState.isIncomplete = snapshot.coverage == .incomplete
         }
-        if let snapshot = await snapshots.load(StudyTask.self, collection: "tasks") {
+        if let snapshot = cache.tasks {
             tasks = snapshot.records
             tasksState.lastSuccess = snapshot.lastSuccess
         }
-        if let snapshot = await snapshots.load(StoredId.self, collection: "starred") {
+        if let snapshot = cache.starred {
             starredIds = Set(snapshot.records.map(\.value))
         }
-        await loadSearchIndex()
     }
 
     func refreshAll() async {
@@ -606,10 +717,16 @@ final class AppModel {
         if case .course(let id) = selection {
             await refreshUpdates(courseId: id)
         }
-        Task(priority: .utility) {
+        backgroundRefreshTask?.cancel()
+        backgroundRefreshTask = Task(priority: .utility) { [weak self] in
+            guard let self else { return }
             await prefetchActiveCourses()
+            // Saving readings can take minutes; briefs and the search index don't wait for it.
+            async let readings: Void = saveUpcomingReadings()
             scheduleBriefsForUpcoming()
+            await startupSearchTask?.value
             await refreshSearchIndexIfStale()
+            await readings
         }
     }
 
@@ -825,8 +942,10 @@ final class AppModel {
 
     // MARK: - Materials
 
+    static func folderKeyPrefix(courseId: Int) -> String { "resources-\(courseId)-" }
+
     static func folderKey(courseId: Int, folderId: Int?) -> String {
-        "resources-\(courseId)-\(folderId.map(String.init) ?? "root")"
+        folderKeyPrefix(courseId: courseId) + (folderId.map(String.init) ?? "root")
     }
 
     func loadFolder(courseId: Int, folderId: Int?) async {
@@ -864,11 +983,200 @@ final class AppModel {
     }
 
     func savedFileURL(for resource: Resource) async -> URL? {
-        guard let downloads, let asset = await downloads.asset(for: resource.id) else { return nil }
-        return await downloads.fileURL(for: asset)
+        guard let downloads else { return nil }
+        if let asset = savedAssets[resource.id], let file = downloads.fileURLIfPresent(for: asset) { return file }
+        guard let asset = await downloads.asset(for: resource.id) else { return nil }
+        return downloads.fileURLIfPresent(for: asset)
     }
 
-    func download(_ resource: Resource) async {
+    private static let messageAttachmentPrefix = "message-attachment:"
+
+
+    static func messageAttachmentKey(_ messageId: Int64) -> String {
+        messageAttachmentPrefix + String(messageId)
+    }
+
+    func openMessageAttachment(_ message: InstantMessage, threadId: Int) async {
+        let messageId = message.messageId
+        let key = Self.messageAttachmentKey(messageId)
+        guard downloadStates[key] != .downloading, case .ready = authState,
+              let downloads, let origin = site?.baseURL, let url = absoluteURL(message.attachmentUrl),
+              FileAcquirer.canAcquireAttachment(at: url, origin: origin) else { return }
+
+        let name = message.attachmentName.flatMap { $0.isBlank ? nil : $0 }
+        Perf.mark("message attachment requested")
+        downloadStates[key] = .downloading
+        defer {
+            if downloads === self.downloads, downloadStates[key] == .downloading {
+                downloadStates[key] = .idle
+            }
+        }
+
+        do {
+            let asset: LocalAsset
+            if let saved = await downloads.asset(for: key) {
+                asset = saved
+                Perf.mark("message attachment cache hit")
+            } else {
+                try Task.checkCancellation()
+                guard downloads === self.downloads else { return }
+                let staged = try await stageMessageAttachment(
+                    at: url, origin: origin, threadId: threadId, messageId: messageId, store: downloads
+                )
+                Perf.mark("message attachment acquired")
+                defer { try? FileManager.default.removeItem(at: staged.file) }
+                try Task.checkCancellation()
+                guard downloads === self.downloads else { return }
+                asset = try await downloads.commit(
+                    stagedFile: staged.file, resourceKey: key,
+                    suggestedName: name ?? staged.suggestedName ?? String(localized: "Attachment"),
+                    contentType: staged.contentType, at: Date()
+                )
+            }
+            try Task.checkCancellation()
+            guard downloads === self.downloads, let file = downloads.fileURLIfPresent(for: asset) else { return }
+            viewerItem = ViewerItem(id: key, title: asset.displayName, fileURL: file)
+            Perf.mark("message attachment shown")
+        } catch {
+            guard downloads === self.downloads else { return }
+            switch error {
+            case is CancellationError: break
+            case FileAcquirerError.websiteOnly, DownloadError.notADocument:
+                downloadStates[key] = .websiteOnly
+            default:
+                downloadStates[key] = .failed("The attachment couldn’t be opened.")
+            }
+        }
+    }
+
+    private func stageMessageAttachment(
+        at url: URL, origin: URL, threadId: Int, messageId: Int64, store: DownloadStore
+    ) async throws -> FileAcquirer.Staged {
+        #if DEBUG
+        if fixtureFlag != nil {
+            guard url.path == "/file/11" else { throw FileAcquirerError.websiteOnly }
+            let file = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+            try FixtureFiles.pdf(title: "Outline").write(to: file)
+            return FileAcquirer.Staged(file: file, suggestedName: "outline.pdf", contentType: "application/pdf")
+        }
+        #endif
+        let session = webSession
+        func ensureCurrent() throws {
+            try Task.checkCancellation()
+            guard store === downloads, session === webSession else { throw CancellationError() }
+        }
+        if let staged = try await FileAcquirer.acquireAttachment(at: url, origin: origin, session: session) {
+            return staged
+        }
+        try ensureCurrent()
+        // Only exchange a URL on the institution's own origin for a signed-in link.
+        if AvatarSession.sameOrigin(url, origin) {
+            let signed = try await fetch(key: Self.messageAttachmentKey(messageId)) { try await $0.ssoURL(for: url) }
+            try ensureCurrent()
+            if let staged = try await FileAcquirer.acquireAttachment(at: signed, origin: origin, session: session) {
+                return staged
+            }
+        } else if messageId < Int64.max {
+            // A download URL in a cached message may have expired. Refresh just this message and retry once.
+            let page = try await fetch(key: "message-attachment-refresh:\(messageId)") {
+                try await $0.messages(threadId: threadId, before: messageId + 1, pageSize: 2)
+            }
+            try ensureCurrent()
+            if let message = page.messages.first(where: { $0.messageId == messageId && $0.isDeleted != true }),
+               let fresh = absoluteURL(message.attachmentUrl), fresh != url,
+               let staged = try await FileAcquirer.acquireAttachment(at: fresh, origin: origin, session: session) {
+                return staged
+            }
+        }
+        throw FileAcquirerError.websiteOnly
+    }
+
+    /// The pointer rests on a file row that isn't saved. After a short pause its download link is
+    /// found, so a click only has to fetch the bytes. One lookup runs at a time; when it ends, the
+    /// row under the pointer by then gets the next one.
+    func pointer(_ resource: Resource, isOver: Bool) {
+        guard isOver, fetchesAhead else {
+            if pointedResource?.id == resource.id {
+                pointedResource = nil
+                pointerDwell?.cancel()
+            }
+            return
+        }
+        pointedResource = resource
+        pointerDwell?.cancel()
+        guard needsLinkLookup(resource) else { return }
+        pointerDwell = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(50))
+            guard let self, !Task.isCancelled, needsLinkLookup(resource) else { return }
+            // The row under the pointer goes before the rest of the screen.
+            if let current = linkLookup, !current.byPointer, current.resource.id != resource.id {
+                current.task.cancel()
+                linkLookup = nil
+                visibleLookups.queue.insert(current.resource, at: 0)
+            }
+            lookUpLinkAhead(resource, byPointer: true)
+        }
+    }
+
+    /// A folder or lesson opened: its first unsaved files are looked up one at a time, so a click
+    /// without a pause on the row is quick too. Leaving the place drops the rest.
+    func lookUpLinksAhead(for resources: [Resource], place: String) {
+        guard fetchesAhead else { return }
+        visibleLookups = (place, Array(resources.filter(needsLinkLookup).prefix(8)))
+        continueLookups()
+    }
+
+    func stopLinksAhead(place: String) {
+        guard visibleLookups.place == place else { return }
+        visibleLookups = ("", [])
+    }
+
+    /// Settings turned this off: nothing more is looked up or saved ahead.
+    func stopFetchingAhead() {
+        cancelLinkLookups()
+        readingPrefetch?.cancel()
+        readingPrefetch = nil
+    }
+
+    private func cancelLinkLookups() {
+        visibleLookups = ("", [])
+        pointerDwell?.cancel()
+        linkLookup?.task.cancel()
+        linkLookup = nil
+    }
+
+    private func needsLinkLookup(_ resource: Resource) -> Bool {
+        guard fetchesAhead, case .ready = authState, savedAssets[resource.id] == nil,
+              downloadStates[resource.id] == nil, FileAcquirer.canAttempt(resource),
+              let session = webSession, session.hasFileSession else { return false }
+        return session.resolvedLink(for: resource.id) == nil
+    }
+
+    private func lookUpLinkAhead(_ resource: Resource, byPointer: Bool) {
+        guard linkLookup == nil, needsLinkLookup(resource), let session = webSession,
+              let client = makeClient() else { return }
+        let task = Task { [weak self] in
+            let finished = await FileAcquirer(session: session, client: client).resolveAhead(resource)
+            guard let self, linkLookup?.resource.id == resource.id else { return finished }
+            linkLookup = nil
+            continueLookups()
+            return finished
+        }
+        linkLookup = (resource, byPointer, task)
+    }
+
+    private func continueLookups() {
+        guard linkLookup == nil else { return }
+        if let pointed = pointedResource, needsLinkLookup(pointed) {
+            lookUpLinkAhead(pointed, byPointer: true)
+            return
+        }
+        while linkLookup == nil, !visibleLookups.queue.isEmpty {
+            lookUpLinkAhead(visibleLookups.queue.removeFirst(), byPointer: false)
+        }
+    }
+
+    func download(_ resource: Resource, onPDFPage: FileAcquirer.PDFPageReady? = nil) async {
         #if DEBUG
         if fixtureFlag != nil {
             await saveFixtureFile(resource)
@@ -877,9 +1185,24 @@ final class AppModel {
         #endif
         guard let session = webSession, let downloads, let client = makeClient() else { return }
         downloadStates[resource.id] = .downloading
+        defer {
+            if downloads === self.downloads, downloadStates[resource.id] == .downloading {
+                downloadStates[resource.id] = .idle
+            }
+        }
         do {
             Perf.mark("file requested")
-            let staged = try await FileAcquirer(session: session, client: client).acquire(resource)
+            // A lookup for this row may already be under way; its link is quicker than starting over.
+            // If it ran to the end without a link, repeating the same chain would only delay signing in.
+            var tryExistingSession = true
+            if let lookup = linkLookup, lookup.resource.id == resource.id {
+                let revision = session.fileSessionRevision
+                let finished = await lookup.task.value
+                tryExistingSession = !finished || session.resolvedLink(for: resource.id) != nil
+                    || session.fileSessionRevision != revision
+            }
+            let staged = try await FileAcquirer(session: session, client: client, onPDFPage: onPDFPage)
+                .acquire(resource, tryExistingSession: tryExistingSession)
             Perf.mark("file acquired")
             defer { try? FileManager.default.removeItem(at: staged.file) }
             let asset = try await downloads.commit(
@@ -892,11 +1215,14 @@ final class AppModel {
             guard !Task.isCancelled, downloads === self.downloads else { return }
             savedAssets[resource.id] = asset
             downloadStates[resource.id] = .idle
-            // A newer copy makes any earlier slide conversion stale.
-            SlideConverter.removeCached(for: resource.id)
+            // Replacing an original invalidates its converted PDF.
+            OfficePDFConverter.removeCached(for: resource.id)
             convertedFiles[resource.id] = nil
+            failedConversions.remove(resource.id)
             queueDocumentSearch(asset, resource: resource)
             scheduleBrief(forReading: resource)
+        } catch is CancellationError {
+            return
         } catch DownloadError.notADocument {
             guard downloads === self.downloads else { return }
             downloadStates[resource.id] = .websiteOnly
@@ -928,8 +1254,9 @@ final class AppModel {
             if index === searchIndex { searchIndexFailed = true }
         }
         guard downloads === self.downloads else { return }
-        SlideConverter.removeCached(for: resource.id)
+        OfficePDFConverter.removeCached(for: resource.id)
         convertedFiles[resource.id] = nil
+        failedConversions.remove(resource.id)
         // Its tab would otherwise show a file that no longer exists.
         if let tab = viewerTabs.first(where: { $0.id == resource.id }) { closeTab(tab) }
     }
@@ -945,6 +1272,42 @@ final class AppModel {
             get { lock.withLock { value } }
             set { lock.withLock { value = newValue } }
         }
+    }
+
+    static func forTesting(signedOut: Bool = false) async -> AppModel {
+        FixtureWrites.shared.reset()
+        let model = AppModel(forTesting: ())
+        await model.startFixtureMode(signedOut: signedOut)
+        return model
+    }
+
+    func waitForSearchReadyForTesting() async {
+        await startupSearchTask?.value
+        await backgroundRefreshTask?.value
+        await searchDocumentWorker?.value
+    }
+
+    func waitForDocumentSearchForTesting() async {
+        await searchDocumentWorker?.value
+    }
+
+    func cleanupForTesting() async {
+        pollTask?.cancel()
+        pollTask = nil
+        backgroundRefreshTask?.cancel()
+        backgroundRefreshTask = nil
+        startupSearchTask?.cancel()
+        startupSearchTask = nil
+        searchDocumentWorker?.cancel()
+        await searchDocumentWorker?.value
+        searchDocumentWorker = nil
+        searchOCRBatch?.cancel()
+        searchOCRBatch = nil
+        let dir = fixtureRoot
+        fixtureRoot = nil
+        resetAccountState()
+        FixtureWrites.shared.reset()
+        if let dir { try? FileManager.default.removeItem(at: dir) }
     }
 
     private func startFixtureMode(signedOut: Bool) async {

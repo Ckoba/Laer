@@ -269,59 +269,8 @@ public enum LectureNoteParser {
     }
 }
 
-/// Finds the note for a lecture: same course, same local day, nearest start within an hour.
+/// Normalization helper retained for generated brief deduplication.
 public enum LectureNoteMatcher {
-    public static let window: TimeInterval = 60 * 60
-
-    public static func note(for plan: PlanPreview, course: Course?, in notes: [LectureNote]) -> LectureNote? {
-        guard let start = realDate(plan.start) else { return nil }
-        return note(courseId: plan.courseId ?? course?.courseId, course: course, start: start, in: notes)
-    }
-
-    public static func note(for event: CalendarEvent, course: Course?, in notes: [LectureNote]) -> LectureNote? {
-        guard let start = realDate(event.fromDate) else { return nil }
-        return note(courseId: event.courseId ?? course?.courseId, course: course, start: start, in: notes)
-    }
-
-    /// Notes with a course ID match on it. Notes without one fall back to the course title.
-    /// A start at local midnight is a plan with a day and no time: the day's one note matches.
-    public static func note(courseId: Int?, course: Course?, start: Date, in notes: [LectureNote]) -> LectureNote? {
-        let candidates = notes.filter { note in
-            guard sameCourse(note, courseId: courseId, course: course) else { return false }
-            guard let day = note.day else { return false }
-            var calendar = Calendar(identifier: .gregorian)
-            calendar.timeZone = note.timeZone ?? .current
-            let local = calendar.dateComponents([.year, .month, .day], from: start)
-            return local.year == day.year && local.month == day.month && local.day == day.day
-        }
-        var best: (note: LectureNote, distance: TimeInterval)?
-        for note in candidates where note.startMinute != nil {
-            guard let noteStart = note.start else { continue }
-            let distance = abs(noteStart.timeIntervalSince(start))
-            guard distance <= window else { continue }
-            if let current = best, current.distance < distance || (current.distance == distance && current.note.path <= note.path) { continue }
-            best = (note, distance)
-        }
-        if let best { return best.note }
-        let undated = candidates.filter { $0.startMinute == nil }
-        if undated.count == 1 { return undated[0] }
-        if isMidnight(start, in: candidates.first?.timeZone), candidates.count == 1 { return candidates[0] }
-        return nil
-    }
-
-    static func sameCourse(_ note: LectureNote, courseId: Int?, course: Course?) -> Bool {
-        if let noteId = note.courseId { return noteId == courseId }
-        guard let title = note.courseTitle.map(normalizedTitle), !title.isEmpty, let course else { return false }
-        return [course.shortTitle, course.displayTitle, course.title].map(normalizedTitle).contains(title)
-    }
-
-    static func isMidnight(_ date: Date, in zone: TimeZone?) -> Bool {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = zone ?? .current
-        let parts = calendar.dateComponents([.hour, .minute], from: date)
-        return parts.hour == 0 && parts.minute == 0
-    }
-
     /// Case, accents, punctuation and spacing ignored.
     static func normalizedTitle(_ text: String) -> String {
         let folded = text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
@@ -357,20 +306,6 @@ public enum WikiLink {
             cursor = range.upperBound
         }
         result += text[cursor...]
-        return result
-    }
-
-    /// Where a link target may be below `folder`, most likely first. Vault links start at the
-    /// vault root, the picked folder's parent, so a leading folder name is dropped; a bare file
-    /// name is also tried in `Readings`. Targets that would leave the folder give none.
-    public static func candidates(_ target: String, in folder: URL) -> [URL] {
-        var parts = target.split(separator: "/").map(String.init)
-        guard !parts.isEmpty, !parts.contains(".."), !parts.contains(".") else { return [] }
-        if parts.count > 1, parts.first == folder.lastPathComponent { parts.removeFirst() }
-        var result = [parts.reduce(folder) { $0.appendingPathComponent($1) }]
-        if let name = parts.last, parts.count == 1 || parts.first != "Readings" {
-            result.append(folder.appendingPathComponent("Readings").appendingPathComponent(name))
-        }
         return result
     }
 }

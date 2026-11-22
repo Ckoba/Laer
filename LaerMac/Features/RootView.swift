@@ -16,6 +16,7 @@ struct RootView: View {
                 SignInView()
             case .ready:
                 MainView()
+                    .onAppear { Perf.mark("main view mounted") }
             }
         }
         .tint(Color.accent)

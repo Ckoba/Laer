@@ -1,9 +1,11 @@
+import AppKit
 import LaerCore
 import SwiftUI
 
 /// The toolbar bell: unread count beside the icon, the newest notifications in a popover.
 struct NotificationsButton: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     @State private var isOpen = false
     @State private var loader = CollectionLoader<ParityNotification>(key: "notifications", coverage: .recentWindow) { client in
         PagedResult(items: try await client.notifications(), isComplete: true)
@@ -32,7 +34,10 @@ struct NotificationsButton: View {
             }
         }
         .popover(isPresented: $isOpen, arrowEdge: .bottom) {
-            NotificationList(loader: loader)
+            NotificationList(loader: loader) { item in
+                isOpen = false
+                if let url = navigation.openNotification(item) { NSWorkspace.shared.open(url) }
+            }
         }
         .task { await loader.load(using: model) }
     }
@@ -41,6 +46,7 @@ struct NotificationsButton: View {
 private struct NotificationList: View {
     @Environment(AppModel.self) private var model
     let loader: CollectionLoader<ParityNotification>
+    let onOpen: (ParityNotification) -> Void
     @State private var markAll = WriteAction()
 
     private func markRead(_ ids: [Int]) async {
@@ -82,7 +88,7 @@ private struct NotificationList: View {
                             .padding(.horizontal, Space.s8)
                     }
                     ForEach(loader.records) { item in
-                        NotificationRow(item: item)
+                        NotificationRow(item: item, open: { onOpen(item) })
                             .contextMenu {
                                 if ParityGate.writes, item.isRead == false {
                                     Button("Mark read") { Task { await markRead([item.notificationId]) } }
@@ -100,8 +106,8 @@ private struct NotificationList: View {
 }
 
 private struct NotificationRow: View {
-    @Environment(AppModel.self) private var model
     let item: ParityNotification
+    let open: () -> Void
 
     /// The publisher, unless the site hides them.
     private var publisher: ParityPerson? { item.isAnonymous == true ? nil : item.publishedBy }
@@ -150,10 +156,6 @@ private struct NotificationRow: View {
     private var symbol: String {
         let kind = "\(item.type ?? "") \(item.text ?? "")".lowercased()
         return kind.contains("plan") ? Symbol.plan : Symbol.update
-    }
-
-    private func open() {
-        if let url = model.absoluteURL(item.url) { NSWorkspace.shared.open(url) }
     }
 }
 

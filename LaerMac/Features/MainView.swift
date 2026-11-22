@@ -1,19 +1,33 @@
 import LaerCore
 import SwiftUI
 
-/// Main window: the rail, the course sidebar, the selected screen in a rounded panel and,
+/// Main window: the collapsible sidebar, the selected screen in a rounded panel and,
 /// when a file is open, the file in a second panel on the right.
 struct MainView: View {
     @Environment(AppModel.self) private var model
     @State private var navigation = Navigation()
 
     /// The person's own choice, kept between launches.
-    @AppStorage("showsSidebar") private var prefersSidebar = true
+    @AppStorage("showsSidebar") private var savedSidebarPreference = true
+    /// Fixtures start expanded and keep changes local to the window.
+    @State private var testSidebarPreference: Bool? =
+        UserDefaults.standard.bool(forKey: "LaerUITestReset") ? true : nil
     /// Set when they ask for the sidebar while an open file would hide it.
     @State private var keepsSidebarWithFile = false
 
     /// The person's dragged sidebar width, kept between launches.
     @AppStorage("sidebarWidth") private var sidebarWidth = Double(Size.sidebar)
+
+    private var prefersSidebar: Bool {
+        get { testSidebarPreference ?? savedSidebarPreference }
+        nonmutating set {
+            if testSidebarPreference != nil {
+                testSidebarPreference = newValue
+            } else {
+                savedSidebarPreference = newValue
+            }
+        }
+    }
 
     private var clampedSidebarWidth: CGFloat {
         min(max(CGFloat(sidebarWidth), Size.sidebarMin), Size.sidebarMax)
@@ -29,7 +43,7 @@ struct MainView: View {
                 shell(showsSidebar: shows)
             }
             .background(Color.rail)
-            .background(WindowButtonWatch(firstButtonCenterX: Size.rail / 2, centerY: Size.topBar / 2))
+            .background(WindowButtonWatch(firstButtonCenterX: Size.firstWindowButtonCenter, centerY: Size.topBar / 2))
         }
         .ignoresSafeArea(.container, edges: .top)
         .environment(navigation)
@@ -43,8 +57,6 @@ struct MainView: View {
         }
         .motion(Motion.base, value: navigation.isPaletteOpen)
         .motion(Motion.base, value: model.viewerItem == nil)
-        .motion(Motion.base, value: prefersSidebar)
-        .motion(Motion.base, value: keepsSidebarWithFile)
         .onChange(of: model.viewerItem == nil) { _, closed in
             if closed { keepsSidebarWithFile = false }
         }
@@ -95,6 +107,8 @@ struct MainView: View {
         // A file opened from the menu bar shows its course on Plans, where the file lives.
         .onAppear(perform: takePlansTabRequest)
         .onChange(of: model.plansTabRequest) { _, _ in takePlansTabRequest() }
+        .onAppear(perform: takeSiteLinkRequest)
+        .onChange(of: model.siteLinkRequest) { _, _ in takeSiteLinkRequest() }
         // Settings removes recognized text without access to this window's navigation.
         .onChange(of: model.searchOCRIsClearing) { _, clearing in if clearing { navigation.forgetRecognizedText() } }
     }
@@ -102,6 +116,18 @@ struct MainView: View {
     private func openPalette() {
         navigation.paletteRestore = nil
         navigation.isPaletteOpen = true
+    }
+
+    private func takeSiteLinkRequest() {
+        guard let request = model.siteLinkRequest else { return }
+        model.siteLinkRequest = nil
+        if !navigation.openSiteLink(request.url, courseId: request.courseId) {
+            if let courseId = request.courseId {
+                model.selection = .course(courseId)
+                navigation.courseTabs[courseId] = .plans
+            }
+            NSWorkspace.shared.open(request.url)
+        }
     }
 
     private func takePlansTabRequest() {
@@ -147,42 +173,33 @@ struct MainView: View {
         .background(TitleBarArea())
     }
 
-    /// The rail on the frame's wider left edge, then the sidebar on the frame, then one
-    /// rounded container holding the screen and the file.
+    /// The sidebar and the rounded container holding the screen and the file.
     private func shell(showsSidebar: Bool) -> some View {
-        HStack(spacing: 0) {
-            if !showsSidebar {
-                Rail()
-                    .transition(.opacity)
-            }
-            if showsSidebar {
-                Sidebar()
-                    .frame(width: clampedSidebarWidth)
-                    .overlay(alignment: .trailing) { SidebarResizeHandle(width: $sidebarWidth) }
-                    .transition(.offset(x: -40).combined(with: .opacity))
-            }
-            // Only the page and the file reader sit in the rounded container; the sidebar
-            // shares the frame's colour, like Mail's.
-            ViewerSplit {
-                VStack(spacing: 0) {
-                    if let notice = model.sessionNotice {
-                        SessionBanner(message: notice)
-                    }
-                    detail
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        ViewerSplit {
+            VStack(spacing: 0) {
+                if let notice = model.sessionNotice {
+                    SessionBanner(message: notice)
                 }
-                .background(Color.stage)
-                .modifier(HistorySwipeShift())
+                detail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
-            .frame(minWidth: 260, maxWidth: .infinity)
-            .overlay { HistorySwipeOverlay() }
-            .clipShape(RoundedRectangle(cornerRadius: Radius.panel, style: .continuous))
-            // The same 8pt of frame on every side: right and bottom here, the left from the
-            // sidebar's own row inset (or the rail's tile margin, topped up below), the top from
-            // the top bar under its controls.
-            .padding([.trailing, .bottom], Size.frameEdge)
-            .padding(.leading, showsSidebar ? 0 : Size.frameEdge - Size.railMargin)
+            .background(Color.stage)
+            .modifier(HistorySwipeShift())
         }
+        .overlay { HistorySwipeOverlay() }
+        .modifier(SidebarSplit(
+            width: showsSidebar ? clampedSidebarWidth : Sidebar.compactWidth,
+            expandedWidth: clampedSidebarWidth
+        ) {
+            Sidebar(showsLabels: showsSidebar, expandedWidth: clampedSidebarWidth)
+                .overlay(alignment: .trailing) {
+                    if showsSidebar {
+                        SidebarResizeHandle(width: $sidebarWidth)
+                            .transition(.identity)
+                    }
+                }
+        })
+        .motion(showsSidebar ? Motion.sidebarExpand : Motion.sidebarCollapse, value: showsSidebar)
     }
 
     @ViewBuilder private var detail: some View {
@@ -206,6 +223,38 @@ struct MainView: View {
     }
 }
 
+/// Re-lays out both panes at the interpolated width so the page follows the sidebar's edge.
+private struct SidebarSplit<SidebarContent: View>: ViewModifier, Animatable {
+    nonisolated var width: CGFloat
+    let expandedWidth: CGFloat
+    @ViewBuilder var sidebar: () -> SidebarContent
+
+    nonisolated var animatableData: CGFloat {
+        get { width }
+        set { width = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        let visibleWidth = min(max(width, Sidebar.compactWidth), expandedWidth)
+        let hasDetailsRoom = visibleWidth >= Sidebar.compactWidth + Size.sidebarIconSlot
+        GeometryReader { geometry in
+            let panelWidth = max(0, geometry.size.width - visibleWidth - Size.frameEdge)
+            let panelHeight = max(0, geometry.size.height - Size.frameEdge)
+            HStack(alignment: .top, spacing: 0) {
+                sidebar()
+                    .environment(\.sidebarHasDetailsRoom, hasDetailsRoom)
+                    .frame(width: visibleWidth, height: geometry.size.height, alignment: .topLeading)
+                    .clipped()
+                content
+                    .frame(width: panelWidth, height: panelHeight)
+                    // Mask the exact panel bounds at every sample of the sidebar animation.
+                    .mask { RoundedRectangle(cornerRadius: Radius.panel, style: .continuous) }
+            }
+        }
+        // The interpolated width is already an animation frame.
+        .animation(nil, value: width)
+    }
+}
 
 /// A thin strip on the sidebar's right edge: drag to resize between `Size.sidebarMin` and
 /// `Size.sidebarMax`, double-click to go back to `Size.sidebar`.
@@ -251,48 +300,56 @@ private struct SidebarResizeHandle: View {
 
 private struct Sidebar: View {
     /// Space between the sidebar's edges and its row fills.
-    static let sidebarInset: CGFloat = Space.s8
+    private static let inset = Space.s8
+    // The same gutters and leading icon column fit in the compact sidebar.
+    static let compactWidth = 2 * (inset + Space.s8) + Size.sidebarIconSlot
+
+    let showsLabels: Bool
+    let expandedWidth: CGFloat
+
     @Environment(AppModel.self) private var model
     @Environment(Updater.self) private var updater
     @Environment(Navigation.self) private var navigation
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var activeAction = WriteAction()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // The app's own places stay put; only the courses scroll.
-            VStack(alignment: .leading, spacing: Space.s2) { destinations }
-                .padding(.horizontal, Self.sidebarInset)
+            VStack(alignment: .leading, spacing: Space.s8) { destinations }
+                .environment(\.rowVerticalPadding, Space.s6)
+                .padding(.horizontal, Self.inset)
                 .padding(.top, Space.s8)
+            if !model.activeCourses.isEmpty {
+                Rectangle()
+                    .fill(Color.borderStrong)
+                    .frame(height: 1)
+                    .padding(.horizontal, Self.inset)
+                    .padding(.top, Space.s12)
+                    .accessibilityHidden(true)
+            }
             ScrollViewReader { proxy in
                 ScrollView {
-                    // A 2pt gap keeps neighbouring highlights from touching.
-                    LazyVStack(alignment: .leading, spacing: Space.s2) {
-                        if !model.activeCourses.isEmpty {
-                            Text("Courses")
-                                .font(Type.section)
-                                .foregroundStyle(Color.textMuted)
-                                .padding(.horizontal, Space.s8)
-                                .padding(.top, Space.s16)
-                                .padding(.bottom, Space.s4)
-                                .accessibilityAddTraits(.isHeader)
-                        }
+                    LazyVStack(alignment: .leading, spacing: Space.s4) {
                         if model.courses.isEmpty {
                             courseListState
                                 .padding(.horizontal, Space.s8)
+                                .sidebarDetails(showsLabels)
                         }
                         ForEach(model.activeCourses) { course in courseRow(course) }
                         if case .failed(let message) = activeAction.phase {
-                            ErrorLine(message).padding(.horizontal, Space.s8)
+                            ErrorLine(message)
+                                .padding(.horizontal, Space.s8)
+                                .sidebarDetails(showsLabels)
                         }
                     }
                     .undividedRows()
-                    // Fills sit `sidebarInset` in from both edges, so a highlight never looks clipped.
-                    .padding(.horizontal, Self.sidebarInset)
+                    .padding(.horizontal, Self.inset)
                     .padding(.top, Space.s8)
                     // The last row keeps clear of the bottom edge and the freshness line.
                     .padding(.bottom, Space.s8)
                 }
+                .scrollIndicators(showsLabels ? .automatic : .hidden)
+                .scrollBounceBehavior(.basedOnSize)
                 // Keyboard moves (Go menu) keep the chosen row in view.
                 .onChange(of: model.selection) { _, selection in
                     if let selection { proxy.scrollTo(selection) }
@@ -300,25 +357,26 @@ private struct Sidebar: View {
             }
             footer
         }
-        // Source-list density: 26pt rows, 13pt labels, 16pt symbol slots.
+        // The icon slot sets the height, even when the text is hidden.
         .environment(\.rowsCompact, true)
-        .environment(\.rowVerticalPadding, 5)
+        .environment(\.rowVerticalPadding, Space.s4)
         // Rows sit on the frame colour, so their fills are the stronger sidebar pair over it.
         .environment(\.rowSurface, Color.rail)
         .environment(\.rowSelectedFill, Color.sidebarSelected)
         .environment(\.rowHoverFill, Color.sidebarHover)
+        .environment(\.sidebarClosingLabelWidth, showsLabels ? nil : expandedWidth - Self.compactWidth)
         .background(Color.rail)
     }
 
     /// The app's own places, labelled, above the courses.
     @ViewBuilder private var destinations: some View {
-        DestinationRow(symbol: Symbol.home, title: "Home", identifier: "rail.home", selection: .home)
-        DestinationRow(symbol: Symbol.task, title: "Assignments", identifier: "rail.upcoming", selection: .upcoming, count: dueSoon)
+        DestinationRow(symbol: Symbol.home, title: "Home", identifier: "rail.home", selection: .home, showsLabel: showsLabels)
+        DestinationRow(symbol: Symbol.task, title: "Assignments", identifier: "rail.upcoming", selection: .upcoming, showsLabel: showsLabels, count: dueSoon)
         if ParityGate.personalCalendar {
-            DestinationRow(symbol: Symbol.plan, title: "Calendar", identifier: "rail.calendar", selection: .calendar)
+            DestinationRow(symbol: Symbol.plan, title: "Calendar", identifier: "rail.calendar", selection: .calendar, showsLabel: showsLabels)
         }
         if ParityGate.messages {
-            MessagesDestinationRow()
+            MessagesDestinationRow(showsLabel: showsLabels)
         }
     }
 
@@ -332,22 +390,25 @@ private struct Sidebar: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: Space.s2) {
             if updater.isVisible {
-                HStack(spacing: Space.s4) {
+                HStack(spacing: 0) {
                     UpdateRailButton()
                     Text("Update available")
                         .font(Type.t12)
                         .foregroundStyle(Color.textMuted)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: !showsLabels, vertical: false)
+                        .padding(.leading, Space.s4)
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                        .clipped()
+                        .sidebarDetails(showsLabels)
                 }
-                .padding(.horizontal, Space.s4)
+                .padding(.horizontal, Self.inset + Space.s4)
             }
             if !model.archivedCourses.isEmpty {
                 RowButton(selected: navigation.isArchiveOpen, action: { navigation.isArchiveOpen.toggle() }) {
-                    HStack(spacing: Space.s8) {
-                        Image(systemName: Symbol.archive)
-                            .font(.system(size: 14, weight: .regular))
-                            .foregroundStyle(Color.textMuted)
-                            .frame(width: Size.icon)
-                            .accessibilityHidden(true)
+                    SidebarRowLabel(showsLabel: showsLabels) {
+                        SidebarSymbol(name: Symbol.archive)
+                    } label: {
                         Text("Archived courses")
                             .font(Type.t13)
                             .foregroundStyle(Color.textMuted)
@@ -358,23 +419,29 @@ private struct Sidebar: View {
                             .foregroundStyle(Color.textFaint)
                     }
                 }
+                .help("Archived courses")
+                .accessibilityLabel("Archived courses, \(model.archivedCourses.count)")
                 .accessibilityIdentifier("rail.archive")
+                .environment(\.rowVerticalPadding, Space.s6)
                 .popover(isPresented: Bindable(navigation).isArchiveOpen, arrowEdge: .trailing) {
                     ArchiveList()
                         .environment(navigation)
                 }
-                .padding(.horizontal, Self.sidebarInset)
+                .padding(.horizontal, Self.inset)
             }
             FreshnessLine(state: model.coursesState)
+                .frame(width: expandedWidth - Space.s32, alignment: .leading)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, Space.s16)
                 .padding(.vertical, Space.s4)
+                .sidebarDetails(showsLabels)
         }
         // The last row ends where the content's bottom corner starts to curve, not beside the curve.
         .padding(.bottom, Size.frameEdge + Radius.panel)
     }
 
     private func courseRow(_ course: Course) -> some View {
-        CourseSidebarRow(course: course)
+        CourseSidebarRow(course: course, showsLabels: showsLabels)
             .contextMenu {
                 if ParityGate.writes {
                     // A child view reads the active list itself, because macOS keeps a context menu
@@ -405,20 +472,29 @@ private struct CourseSidebarRow: View {
     @Environment(Navigation.self) private var navigation
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let course: Course
+    let showsLabels: Bool
     @State private var isHovering = false
 
     private var isExpanded: Bool { navigation.expandedCourses.contains(course.courseId) }
 
+    private var monogram: String {
+        guard let word = course.shortTitle.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).first else { return "" }
+        return word.prefix(1).uppercased() + word.dropFirst().prefix(1)
+    }
+
     var body: some View {
         let isSelected = model.selection == .course(course.courseId)
+        let colour = Color.course(course.courseId)
         VStack(alignment: .leading, spacing: Space.s2) {
             RowButton(selected: isSelected && !isExpanded, action: { open(nil) }) {
-                HStack(spacing: Space.s8) {
-                    Circle()
-                        .fill(Color.course(course.courseId))
-                        .frame(width: 8, height: 8)
-                        .frame(width: Size.icon)
-                        .accessibilityHidden(true)
+                SidebarRowLabel(showsLabel: showsLabels) {
+                    Text(monogram)
+                        .font(Type.courseMonogram)
+                        .foregroundStyle(colour)
+                        .lineLimit(1)
+                        .frame(width: Size.courseMonogram, height: Size.courseMonogram)
+                        .background(Circle().fill(colour.opacity(isSelected ? 0.34 : 0.16)))
+                } label: {
                     Text(course.shortTitle)
                         .font(Type.t13)
                         .foregroundStyle(Color.text)
@@ -432,24 +508,28 @@ private struct CourseSidebarRow: View {
             .help(course.displayTitle)
             .accessibilityLabel(course.displayTitle)
             .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-            .accessibilityIdentifier("sidebar.course.\(course.courseId)")
-            .overlay(alignment: .trailing) { chevron }
+            .accessibilityIdentifier("\(showsLabels ? "sidebar" : "rail").course.\(course.courseId)")
+            .overlay(alignment: .trailing) {
+                chevron.sidebarDetails(showsLabels)
+            }
             if isExpanded {
                 ForEach(CourseTab.available(grades: GradesAvailability.shared.isAvailable(courseId: course.courseId, model: model)), id: \.self) { tab in
                     let tabSelected = isSelected && navigation.tab(for: course.courseId) == tab
                     RowButton(selected: tabSelected, action: { open(tab) }) {
-                        HStack(spacing: Space.s8) {
+                        SidebarRowLabel(showsLabel: showsLabels) {
                             Image(systemName: tab.symbol)
                                 .font(.system(size: 14, weight: .regular))
-                                .frame(width: Size.icon)
-                                .accessibilityHidden(true)
+                                .offset(x: Space.s4)
+                        } label: {
                             Text(tab.title)
                                 .font(Type.t13)
                                 .lineLimit(1)
+                                .padding(.leading, Space.s4)
                         }
                         .foregroundStyle(tabSelected ? Color.text : Color.textMuted)
                     }
-                    .padding(.leading, Space.s16)
+                    .help(tab.title)
+                    .accessibilityLabel(tab.title)
                     .accessibilityIdentifier("sidebar.course.\(course.courseId).\(tab.title)")
                 }
             }
@@ -503,6 +583,65 @@ struct ActiveMenuItem: View {
     }
 }
 
+/// Opening lets the label reflow. Closing clips its expanded layout at the moving edge.
+private struct SidebarRowLabel<Icon: View, Label: View>: View {
+    @Environment(\.sidebarClosingLabelWidth) private var closingLabelWidth
+    let showsLabel: Bool
+    @ViewBuilder var icon: () -> Icon
+    @ViewBuilder var label: () -> Label
+
+    var body: some View {
+        HStack(spacing: 0) {
+            icon()
+                .frame(width: Size.sidebarIconSlot, height: Size.sidebarIconSlot)
+                .accessibilityHidden(true)
+            Color.clear
+                .frame(height: Size.sidebarIconSlot)
+                .overlay(alignment: .leading) {
+                    HStack(spacing: Space.s8, content: label)
+                        .padding(.leading, Space.s8)
+                        .frame(width: closingLabelWidth, alignment: .leading)
+                        .allowsHitTesting(showsLabel)
+                        .accessibilityHidden(!showsLabel)
+                }
+                .clipped()
+        }
+    }
+}
+
+private struct SidebarSymbol: View {
+    let name: String
+
+    var body: some View {
+        Image(systemName: name)
+            .font(.system(size: Size.sidebarSymbol, weight: .regular))
+            .foregroundStyle(Color.textMuted)
+    }
+}
+
+private extension EnvironmentValues {
+    @Entry var sidebarHasDetailsRoom = true
+    @Entry var sidebarClosingLabelWidth: CGFloat? = nil
+}
+
+private struct SidebarDetails: ViewModifier {
+    @Environment(\.sidebarHasDetailsRoom) private var hasDetailsRoom
+    let visible: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(hasDetailsRoom ? 1 : 0)
+            .allowsHitTesting(visible)
+            .accessibilityHidden(!visible)
+    }
+}
+
+private extension View {
+    func sidebarDetails(_ visible: Bool) -> some View {
+        modifier(SidebarDetails(visible: visible))
+    }
+}
+
 /// One of the app's own places in the source list: icon, label and an optional count.
 private struct DestinationRow: View {
     @Environment(AppModel.self) private var model
@@ -510,17 +649,15 @@ private struct DestinationRow: View {
     let title: String
     let identifier: String
     let selection: AppModel.Selection
+    let showsLabel: Bool
     var count: Int = 0
 
     var body: some View {
         let isSelected = model.selection == selection || (selection == .home && model.selection == nil)
         RowButton(selected: isSelected, action: { model.selection = selection }) {
-            HStack(spacing: Space.s8) {
-                Image(systemName: symbol)
-                    .font(.system(size: 14, weight: .regular))
-                    .foregroundStyle(Color.textMuted)
-                    .frame(width: Size.icon)
-                    .accessibilityHidden(true)
+            SidebarRowLabel(showsLabel: showsLabel) {
+                SidebarSymbol(name: symbol)
+            } label: {
                 Text(title)
                     .font(Type.t13)
                     .foregroundStyle(Color.text)
@@ -534,6 +671,7 @@ private struct DestinationRow: View {
                 }
             }
         }
+        .help(title)
         .accessibilityLabel(count > 0 ? "\(title), \(count)" : title)
         .accessibilityIdentifier(identifier)
     }
@@ -541,11 +679,12 @@ private struct DestinationRow: View {
 
 private struct MessagesDestinationRow: View {
     @Environment(AppModel.self) private var model
+    let showsLabel: Bool
 
     var body: some View {
         DestinationRow(
             symbol: Symbol.message, title: "Messages", identifier: "rail.messages", selection: .messages,
-            count: model.unreadThreadCount ?? 0
+            showsLabel: showsLabel, count: model.unreadThreadCount ?? 0
         )
         .task(id: model.selection) { await model.refreshUnreadThreadCount() }
     }

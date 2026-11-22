@@ -134,7 +134,7 @@ extension AppModel {
         var files: [(url: URL, title: String)] = []
         for item in saved {
             if ReadingExtractor.isSlides(item.url) {
-                guard let pdf = try? await SlideConverter().convert(item.url, id: item.asset.id) else { continue }
+                guard let pdf = try? await OfficePDFConverter.convert(item.url, id: item.asset.id) else { continue }
                 files.append((pdf, item.title))
             } else {
                 files.append((item.url, item.title))

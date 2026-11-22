@@ -44,6 +44,17 @@
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A10000010000000000000003"
+               BuildableName = "LaerMacTests.xctest"
+               BlueprintName = "LaerMacTests"
+               ReferencedContainer = "container:Laer.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "554C2B4BF79D13C1238999D8"
                BuildableName = "LaerMacUITests.xctest"
                BlueprintName = "LaerMacUITests"

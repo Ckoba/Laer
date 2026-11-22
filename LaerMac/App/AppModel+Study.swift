@@ -84,6 +84,7 @@ extension AppModel {
 
     /// Shows a file at once, in a tab that fills in when the bytes arrive.
     func open(_ resource: Resource) async {
+        Perf.mark("file open requested")
         let store = snapshots
         if let url = await savedFileURL(for: resource) {
             guard !Task.isCancelled, store === snapshots else { return }
@@ -94,14 +95,32 @@ extension AppModel {
             return
         }
         guard !Task.isCancelled, store === snapshots else { return }
-        if FileAcquirer.canAttempt(resource) {
-            viewerItem = ViewerItem(id: resource.id, title: resource.title, fileURL: nil)
+        let openingID = FileAcquirer.canAttempt(resource) ? UUID() : nil
+        let onPDFPage: FileAcquirer.PDFPageReady?
+        if let openingID {
+            viewerItem = ViewerItem(id: resource.id, title: resource.title, fileURL: nil, openingID: openingID)
+            if ViewerItem.mayNeedPDFConversion(named: resource.title) {
+                onPDFPage = nil
+                Task(priority: .utility) {
+                    guard store === snapshots, viewerTabs.contains(where: { $0.id == resource.id && $0.fileURL == nil }) else { return }
+                    OfficePDFConverter.prepareRenderer()
+                }
+            } else {
+                onPDFPage = { [weak self] page in
+                    guard let self, store === self.snapshots else { return }
+                    self.showFirstPDFPage(page, openingID: openingID)
+                }
+            }
+        } else {
+            onPDFPage = nil
         }
-        await download(resource)
+        await download(resource, onPDFPage: onPDFPage)
         guard !Task.isCancelled, store === snapshots else { return }
-        if let url = await savedFileURL(for: resource) {
-            guard !Task.isCancelled, store === snapshots else { return }
-            viewerItem = ViewerItem(id: resource.id, title: resource.title, fileURL: url)
+        let url = await savedFileURL(for: resource)
+        guard !Task.isCancelled, store === snapshots else { return }
+        if let openingID, !viewerTabs.contains(where: { $0.openingID == openingID }) { return }
+        if let url {
+            viewerItem = ViewerItem(id: resource.id, title: resource.title, fileURL: url, openingID: openingID)
             noteRecent(resource)
         } else if let tab = viewerTabs.first(where: { $0.id == resource.id && $0.fileURL == nil }) {
             // Not a file after all. The caller decides what to show instead.

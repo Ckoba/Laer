@@ -142,16 +142,6 @@ brief: false
 
 private func instant(_ text: String) -> Date { try! Date(text, strategy: Date.ISO8601FormatStyle()) }
 
-private func plan(_ id: Int, course: Int?, start: String?, stop: String? = nil) -> PlanPreview {
-    var parts = ["\"id\":\(id)"]
-    if let course { parts.append("\"courseId\":\(course)") }
-    if let start { parts.append("\"start\":\"\(start)\"") }
-    if let stop { parts.append("\"stop\":\"\(stop)\"") }
-    let decoder = JSONDecoder()
-    decoder.dateDecodingStrategy = APIDate.decoding
-    return try! decoder.decode(PlanPreview.self, from: Data("{\(parts.joined(separator: ","))}".utf8))
-}
-
 @Suite struct LectureNoteParserTests {
     @Test func readsFrontmatter() throws {
         let note = try #require(LectureNoteParser.parse(danishNote, path: "Courses/A/Lectures/a.md"))
@@ -224,66 +214,6 @@ private func plan(_ id: Int, course: Int?, start: String?, stop: String? = nil) 
     }
 }
 
-@Suite struct LectureNoteMatcherTests {
-    let notes = [danishNote, englishNote, leadOnlyNote, noBriefNote].enumerated().compactMap { index, text in
-        LectureNoteParser.parse(text, path: "note-\(index).md")
-    }
-
-    @Test func matchesCourseDayAndNearestStart() {
-        // Plans often start at the quarter past.
-        let match = LectureNoteMatcher.note(for: plan(1, course: 1001, start: "2026-03-10T07:15:00Z"), course: nil, in: notes)
-        #expect(match?.courseId == 1001)
-    }
-
-    @Test func refusesStartsMoreThanAnHourAway() {
-        #expect(LectureNoteMatcher.note(for: plan(1, course: 1001, start: "2026-03-10T08:01:00Z"), course: nil, in: notes) == nil)
-        #expect(LectureNoteMatcher.note(for: plan(1, course: 1001, start: "2026-03-10T08:00:00Z"), course: nil, in: notes) != nil)
-    }
-
-    @Test func refusesOtherCoursesAndDays() {
-        #expect(LectureNoteMatcher.note(for: plan(1, course: 9999, start: "2026-03-10T07:00:00Z"), course: nil, in: notes) == nil)
-        #expect(LectureNoteMatcher.note(for: plan(1, course: 1001, start: "2026-03-11T07:00:00Z"), course: nil, in: notes) == nil)
-        #expect(LectureNoteMatcher.note(for: plan(1, course: 1001, start: nil), course: nil, in: notes) == nil)
-    }
-
-    @Test func picksTheNearestOfTwoOnOneDay() {
-        let morning = LectureNoteParser.parse(englishNote.replacingOccurrences(of: "\"16:00\"", with: "\"10:00\"").replacingOccurrences(of: "Exercises", with: "Lecture"), path: "z-morning.md")!
-        let all = notes + [morning]
-        #expect(LectureNoteMatcher.note(for: plan(1, course: 1002, start: "2026-03-10T09:15:00Z"), course: nil, in: all)?.path == "z-morning.md")
-        #expect(LectureNoteMatcher.note(for: plan(1, course: 1002, start: "2026-03-10T15:15:00Z"), course: nil, in: all)?.path == "note-1.md")
-    }
-
-    @Test func fallsBackToTheCourseTitle() {
-        let course = Course(courseId: 5, title: "Example economics, spring 26")
-        let match = LectureNoteMatcher.note(for: plan(1, course: 5, start: "2026-03-24T09:15:00Z"), course: course, in: notes)
-        #expect(match?.path == "note-3.md")
-        let other = Course(courseId: 5, title: "Something else")
-        #expect(LectureNoteMatcher.note(for: plan(1, course: 5, start: "2026-03-24T09:15:00Z"), course: other, in: notes) == nil)
-    }
-
-    @Test func aCourseIdBeatsTheTitle() {
-        // The note names its course ID, so a same-titled course with another ID does not match.
-        let course = Course(courseId: 77, title: "Example Economics")
-        #expect(LectureNoteMatcher.note(for: plan(1, course: 77, start: "2026-03-10T15:00:00Z"), course: course, in: notes) == nil)
-    }
-
-    @Test func aDayOnlyPlanMatchesTheDaysOneNote() {
-        // Midnight in the note's zone.
-        let match = LectureNoteMatcher.note(for: plan(1, course: 1003, start: "2026-03-11T23:00:00Z"), course: nil, in: notes)
-        #expect(match?.status == .noTeaching)
-    }
-
-    @Test func usesTheNotesTimeZoneForTheDay() {
-        // 23:30 UTC on the 9th is 00:30 on the 10th in Berlin: still outside the hour.
-        #expect(LectureNoteMatcher.note(for: plan(1, course: 1001, start: "2026-03-09T23:30:00Z"), course: nil, in: notes) == nil)
-    }
-
-    @Test func matchesCalendarEvents() {
-        let event = CalendarEvent(eventId: 1, title: "E", fromDate: instant("2026-03-10T15:00:00Z"), toDate: nil, courseId: 1002)
-        #expect(LectureNoteMatcher.note(for: event, course: nil, in: notes)?.courseId == 1002)
-    }
-}
-
 @Suite struct BriefTextTests {
     @Test func flattensBlockMarkdown() {
         let section = BriefSection(kind: .keyConcepts, title: "Key concepts", body: "> Quote\n\n\n* **A** – one\n  - nested\n1. First [[uni/Readings/x.pdf|X]]\n")
@@ -298,30 +228,5 @@ private func plan(_ id: Int, course: Int?, start: String?, stop: String? = nil) 
         #expect(WikiLink.markdown(text, scheme: "laer-note") == "See [A b](laer-note:uni/Readings/1__A%20b.pdf) and [Other note](laer-note:Other%20note).")
         #expect(WikiLink.markdown("[[a#Heading|x]]", scheme: nil) == "x")
         #expect(WikiLink.markdown("[[uni/Readings/A (2013 b.pdf|A]]", scheme: "s") == "[A](s:uni/Readings/A%20%282013%20b.pdf)")
-    }
-
-    @Test func resolvesInsideThePickedFolder() {
-        let folder = URL(fileURLWithPath: "/tmp/vault/uni")
-        #expect(WikiLink.candidates("uni/Readings/a.pdf", in: folder).map(\.path) == ["/tmp/vault/uni/Readings/a.pdf"])
-        #expect(WikiLink.candidates("a.pdf", in: folder).map(\.path) == ["/tmp/vault/uni/a.pdf", "/tmp/vault/uni/Readings/a.pdf"])
-        #expect(WikiLink.candidates("../secret.pdf", in: folder).isEmpty)
-    }
-}
-
-@Suite struct LectureNoteScannerTests {
-    @Test func readsOnlyLectureFolders() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("laer-notes-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let lectures = root.appendingPathComponent("Courses/Example/Lectures", isDirectory: true)
-        try FileManager.default.createDirectory(at: lectures, withIntermediateDirectories: true)
-        try danishNote.write(to: lectures.appendingPathComponent("2026-03-10 - 9 - Eksempel.md"), atomically: true, encoding: .utf8)
-        try "# not frontmatter".write(to: lectures.appendingPathComponent("plain.md"), atomically: true, encoding: .utf8)
-        try danishNote.write(to: root.appendingPathComponent("Courses/Example/Index.md"), atomically: true, encoding: .utf8)
-        let before = try FileManager.default.contentsOfDirectory(atPath: lectures.path).sorted()
-
-        let notes = LectureNoteScanner.scan(root)
-        #expect(notes.map(\.path) == ["Courses/Example/Lectures/2026-03-10 - 9 - Eksempel.md"])
-        #expect(try FileManager.default.contentsOfDirectory(atPath: lectures.path).sorted() == before)
-        #expect(LectureNoteScanner.scan(root.appendingPathComponent("missing")).isEmpty)
     }
 }

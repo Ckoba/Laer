@@ -6,7 +6,7 @@ import WebKit
 @MainActor
 final class WebSession: NSObject {
     let site: Site
-    /// Created on first use. A signed-in launch never needs a browser engine.
+    /// Created on first use for sign-in, same-origin reads, or preparing the file session.
     lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = dataStore
@@ -20,6 +20,21 @@ final class WebSession: NSObject {
     }()
     private let dataStore = WKWebsiteDataStore.default()
     private var navigationWaiters: [CheckedContinuation<Void, Never>] = []
+    var standbyFileResolver: Task<WKWebView, Never>?
+    private(set) var hasFileSession = false
+    private(set) var fileSessionRevision = 0
+    /// Download links found before a click, by resource key. Memory only, and only for this session.
+    private var resolvedLinks: [String: (link: ResolvedLink, revision: Int, foundAt: ContinuousClock.Instant)] = [:]
+    private static let resolvedLinkLifetime: Duration = .seconds(600)
+    private var linkClient: NativeFileLink.Client?
+
+    /// Plain-HTTP file lookups for this website session.
+    var fileLinkClient: NativeFileLink.Client {
+        if let linkClient { return linkClient }
+        let client = NativeFileLink.Client(origin: site.baseURL)
+        linkClient = client
+        return client
+    }
 
     /// Called after each finished navigation, so sign-in can notice the return to the site.
     var onNavigationFinished: (() -> Void)?
@@ -107,8 +122,68 @@ final class WebSession: NSObject {
         await dataStore.httpCookieStore.allCookies()
     }
 
+    /// Establish the same account's website session on a small page, without visiting any files.
+    func prepareFileSession(client: ItslearningClient) async {
+        guard !hasFileSession else { return }
+        let revision = fileSessionRevision
+        let page = site.baseURL.appending(path: "robots.txt")
+        guard let link = try? await client.ssoURL(for: page), !Task.isCancelled,
+              AvatarSession.sameOrigin(link, site.baseURL), revision == fileSessionRevision, !hasFileSession else { return }
+        webView.load(URLRequest(url: link))
+        await waitForNavigation(timeout: .seconds(4))
+        if !Task.isCancelled, webView.url == page, revision == fileSessionRevision {
+            hasFileSession = true
+            Perf.mark("file site session ready")
+        }
+    }
+
+    /// A signed-in download leaves a reusable website session.
+    func noteFileSession(ifCurrent revision: Int) {
+        guard revision == fileSessionRevision else { return }
+        hasFileSession = true
+    }
+
+    /// A download link and, when plain HTTP found it, the cookies that chain set for the link's host.
+    struct ResolvedLink {
+        var url: URL
+        var cookies: [HTTPCookie]?
+    }
+
+    func resolvedLink(for key: String) -> ResolvedLink? {
+        guard let entry = resolvedLinks[key] else { return nil }
+        guard entry.revision == fileSessionRevision,
+              ContinuousClock.now - entry.foundAt < Self.resolvedLinkLifetime else {
+            resolvedLinks[key] = nil
+            return nil
+        }
+        return entry.link
+    }
+
+    /// A link is used once. If it no longer works, the caller resolves again.
+    func takeResolvedLink(for key: String) -> ResolvedLink? {
+        defer { resolvedLinks[key] = nil }
+        return resolvedLink(for: key)
+    }
+
+    func storeResolvedLink(_ link: ResolvedLink, for key: String, revision: Int) {
+        guard revision == fileSessionRevision else { return }
+        resolvedLinks[key] = (link, revision, ContinuousClock.now)
+    }
+
+    func invalidateFileSession(ifCurrent revision: Int? = nil) {
+        guard revision == nil || revision == fileSessionRevision else { return }
+        hasFileSession = false
+        resolvedLinks = [:]
+        linkClient?.invalidate()
+        linkClient = nil
+        fileSessionRevision += 1
+        standbyFileResolver?.cancel()
+        standbyFileResolver = nil
+    }
+
     /// Removes this app's website data, which ends its session. Saved files are not touched.
     func clearWebsiteData() async {
+        invalidateFileSession()
         let types = WKWebsiteDataStore.allWebsiteDataTypes()
         let records = await dataStore.dataRecords(ofTypes: types)
         await dataStore.removeData(ofTypes: types, for: records)

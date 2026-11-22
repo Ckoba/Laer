@@ -58,6 +58,7 @@ struct MaterialsView: View {
         }
         .dividedRows()
         .task(id: key) { await model.loadFolder(courseId: course.courseId, folderId: folderId) }
+        .looksUpFilesAhead(items.filter { !$0.isFolder }, place: key)
     }
 }
 
@@ -158,7 +159,10 @@ struct ResourceRow: View {
                         .padding(.trailing, Space.s8)
                 }
             }
-            .onHover { isHovered = $0 }
+            .onHover {
+                isHovered = $0
+                model.pointer(resource, isOver: $0)
+            }
             .contextMenu { menu }
     }
 
@@ -261,10 +265,9 @@ struct ResourceRow: View {
             Task { await openSaved() }
         } else if FileAcquirer.canAttempt(resource) {
             Task {
-                await model.download(resource)
-                if model.savedAssets[resource.id] != nil {
-                    await openSaved()
-                } else if ParityGate.pages {
+                // The same path as a plan's files: a tab at once, and the first page while the rest downloads.
+                await model.open(resource)
+                if model.savedAssets[resource.id] == nil, ParityGate.pages {
                     // Not a file: it may be a page, which reads natively. The reader falls back to the website.
                     model.clearDownloadState(resource)
                     onRead()

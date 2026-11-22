@@ -20,6 +20,13 @@
 			remoteGlobalIDString = D8740EB30B0749E3598F9E16;
 			remoteInfo = Laer;
 		};
+		A10000010000000000000009 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BCE55EE845C770D2F4D10886 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D8740EB30B0749E3598F9E16;
+			remoteInfo = Laer;
+		};
 		5CF7EB1605CD17D4A16C5D33 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = BCE55EE845C770D2F4D10886 /* Project object */;
@@ -48,6 +55,7 @@
 		53968E51695221BB2B9A0485 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
 		5C9DB2796B00BC406EBA2A45 /* LaerCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = LaerCore; path = Packages/LaerCore; sourceTree = SOURCE_ROOT; };
 		68F0029CF220394908EF126F /* LaerMacUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LaerMacUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000010000000000000002 /* LaerMacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LaerMacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -58,6 +66,15 @@
 			explicitFolders = (
 			);
 			path = LaerMacUITests;
+			sourceTree = "<group>";
+		};
+		A10000010000000000000001 /* LaerMacTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = LaerMacTests;
 			sourceTree = "<group>";
 		};
 		BBF859305BC24D130DEACDD7 /* LaerMac */ = {
@@ -97,6 +114,7 @@
 			isa = PBXGroup;
 			children = (
 				17873333EE835274E8FB8E88 /* Laer.app */,
+				A10000010000000000000002 /* LaerMacTests.xctest */,
 				68F0029CF220394908EF126F /* LaerMacUITests.xctest */,
 				26FBB5F076122400EF8D5E19 /* LaerQuickLookService.xpc */,
 			);
@@ -124,6 +142,7 @@
 			children = (
 				6600E28F8AE725694DE6BFBA /* Config */,
 				BBF859305BC24D130DEACDD7 /* LaerMac */,
+				A10000010000000000000001 /* LaerMacTests */,
 				7522D2268D75546740FE2612 /* LaerMacUITests */,
 				FECDA7E6BB29AA2D5648BB70 /* LaerQuickLookService */,
 				CE2812A23287FE0E5A0432D5 /* Packages */,
@@ -177,6 +196,28 @@
 			productReference = 68F0029CF220394908EF126F /* LaerMacUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		A10000010000000000000003 /* LaerMacTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1000001000000000000000B /* Build configuration list for PBXNativeTarget "LaerMacTests" */;
+			buildPhases = (
+				A10000010000000000000004 /* Sources */,
+				A10000010000000000000005 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A1000001000000000000000A /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A10000010000000000000001 /* LaerMacTests */,
+			);
+			name = LaerMacTests;
+			packageProductDependencies = (
+			);
+			productName = LaerMacTests;
+			productReference = A10000010000000000000002 /* LaerMacTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		D8740EB30B0749E3598F9E16 /* Laer */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = A918750F4E5713B6CFC4F0FC /* Build configuration list for PBXNativeTarget "Laer" */;
@@ -219,6 +260,10 @@
 						ProvisioningStyle = Automatic;
 						TestTargetID = D8740EB30B0749E3598F9E16;
 					};
+					A10000010000000000000003 = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = D8740EB30B0749E3598F9E16;
+					};
 					D8740EB30B0749E3598F9E16 = {
 						ProvisioningStyle = Automatic;
 					};
@@ -244,6 +289,7 @@
 			targets = (
 				D8740EB30B0749E3598F9E16 /* Laer */,
 				20918E315303282AE4D0DD10 /* LaerQuickLookService */,
+				A10000010000000000000003 /* LaerMacTests */,
 				554C2B4BF79D13C1238999D8 /* LaerMacUITests */,
 			);
 		};
@@ -265,6 +311,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		C39F056154837646A37D26CB /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000010000000000000005 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -295,6 +348,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10000010000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -307,6 +367,11 @@
 			isa = PBXTargetDependency;
 			target = D8740EB30B0749E3598F9E16 /* Laer */;
 			targetProxy = 242800D00498F034D7A890DC /* PBXContainerItemProxy */;
+		};
+		A1000001000000000000000A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D8740EB30B0749E3598F9E16 /* Laer */;
+			targetProxy = A10000010000000000000009 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -532,6 +597,40 @@
 			};
 			name = Debug;
 		};
+		A1000001000000000000000C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.laer.LaerMacTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Laer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Laer";
+			};
+			name = Debug;
+		};
+		A1000001000000000000000D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.laer.LaerMacTests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Laer.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Laer";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -567,6 +666,15 @@
 			buildConfigurations = (
 				5ADC6B845556DAA524AA44C2 /* Debug */,
 				75CCD13211D1C9AB9B297D29 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A1000001000000000000000B /* Build configuration list for PBXNativeTarget "LaerMacTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1000001000000000000000C /* Debug */,
+				A1000001000000000000000D /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

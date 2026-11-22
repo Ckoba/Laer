@@ -264,19 +264,32 @@ private struct ThreadView: View {
     let thread: MessageThread
     let me: Int?
     let onChange: () async -> Void
-    @State private var older: [InstantMessage] = []
-    @State private var olderState = CollectionState()
-    /// The next older page, fetched ahead so "Show older" appears only when there is one.
-    @State private var pending: [InstantMessage] = []
-    @State private var pendingHasMore = false
+    @State private var history: [Int64: InstantMessage] = [:]
+    @State private var hasMoreHistory = false
+    @State private var historyState = CollectionState()
+    @State private var visibleMessage: Int64?
+    @State private var composerHeight: CGFloat = 0
+
+    private static let historyPageSize = 30
+    private static let transcriptEnd = "messages.transcript.end"
+
+    private var embeddedMessages: [InstantMessage] {
+        var messages = [thread.lastMessage].compactMap { $0 }
+        messages += thread.recentMessages?.items ?? []
+        return messages
+    }
 
     private var messages: [InstantMessage] {
-        var seen = Set<Int64>()
-        let all = (thread.recentMessages?.items ?? []) + older + [thread.lastMessage].compactMap { $0 }
-        return all.filter { seen.insert($0.messageId).inserted }.sorted { $0.messageId < $1.messageId }
+        var messages = Dictionary(embeddedMessages.map { ($0.id, $0) }, uniquingKeysWith: { _, full in full })
+        // The history request can supply a newer signed attachment URL for an embedded message.
+        messages.merge(history) { _, fetched in fetched }
+        return messages.values.sorted { $0.id < $1.id }
     }
 
     var body: some View {
+        let messages = messages
+        let olderCursor = hasMoreHistory && messages.prefix(4).contains(where: { $0.id == visibleMessage })
+            ? messages.first?.id : nil
         VStack(alignment: .leading, spacing: 0) {
             // The same row height and top padding as the list's "Messages" title, so the two titles
             // share a baseline; smaller than the page title so the conversation does not compete.
@@ -301,114 +314,104 @@ private struct ThreadView: View {
             Rectangle().fill(Color.border).frame(height: 1)
             ScrollViewReader { proxy in
                 GeometryReader { viewport in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        if ParityGate.olderMessages, !pending.isEmpty || isFailed {
-                            HStack(spacing: Space.s8) {
-                                if !pending.isEmpty {
-                                    OlderMessagesButton(isLoading: olderState.phase == .loading) { Task { await showOlder() } }
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            if case .failed(let message) = historyState.phase {
+                                ErrorLine(message).padding(.bottom, Space.s8)
+                            }
+                            if messages.isEmpty, loadedHistory {
+                                EmptyLine("No messages in this conversation")
+                            }
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                ForEach(MessagePlacement.place(messages, me: me)) { placement in
+                                    MessageRow(message: placement.message, threadId: thread.threadId,
+                                               placement: placement, isGroup: isGroup,
+                                               imageURL: thread.senderImageURLString(for: placement.message), onChange: onChange)
+                                        .padding(.top, placement.isFirst ? 0 : (placement.startsGroup ? Space.s12 : Space.s2))
+                                        .id(placement.message.messageId)
                                 }
-                                if olderState.phase == .loading { Spinner() }
-                                if case .failed(let message) = olderState.phase { ErrorLine(message) }
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.bottom, Space.s8)
+                            .scrollTargetLayout()
+                            Color.clear
+                                .frame(height: composerHeight + Space.s16)
+                                .accessibilityHidden(true)
+                                .id(Self.transcriptEnd)
                         }
-                        if messages.isEmpty {
-                            EmptyLine("No messages in this conversation")
-                        }
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(MessagePlacement.place(messages, me: me)) { placement in
-                                MessageRow(message: placement.message, placement: placement, isGroup: isGroup,
-                                           imageURL: thread.senderImageURLString(for: placement.message), onChange: onChange)
-                                    .padding(.top, placement.isFirst ? 0 : (placement.startsGroup ? Space.s12 : Space.s2))
-                                    .id(placement.message.messageId)
-                            }
-                        }
+                        .frame(maxWidth: Size.readingColumn, alignment: .leading)
+                        .padding(.horizontal, Space.page)
+                        .padding(.top, Space.s16)
+                        .frame(maxWidth: .infinity, minHeight: viewport.size.height, alignment: .topLeading)
                     }
-                    .frame(maxWidth: Size.readingColumn, alignment: .leading)
-                    .padding(.horizontal, Space.page)
-                    .padding(.vertical, Space.s16)
-                    // At least the viewport tall and top-aligned: "Earlier messages" is the first thing in
-                    // the content, and a long thread still opens at its newest message.
-                    .frame(maxWidth: .infinity, minHeight: viewport.size.height, alignment: .topLeading)
-                }
-                .defaultScrollAnchor(.bottom)
+                    .scrollPosition(id: $visibleMessage, anchor: .top)
+                    .defaultScrollAnchor(.bottom)
+                    .accessibilityIdentifier("messages.transcript")
                 }
                 .frame(maxHeight: .infinity)
-                .onAppear { scrollToNewest(proxy) }
-                .onChange(of: messages.last?.messageId) { _, _ in scrollToNewest(proxy) }
-            }
-            if ParityGate.writes {
-                Rectangle().fill(Color.border).frame(height: 1)
-                ReplyComposer(threadId: thread.threadId, onSent: onChange)
-                    .frame(maxWidth: Size.readingColumn, alignment: .leading)
-                    .padding(.horizontal, Space.page)
-                    .padding(.bottom, Space.s12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                .overlay(alignment: .top) {
+                    if historyState.phase == .loading { Spinner().padding(.top, Space.s4) }
+                }
+                .overlay(alignment: .bottom) {
+                    if ParityGate.writes {
+                        ReplyComposer(threadId: thread.threadId, onSent: onChange)
+                            .frame(maxWidth: Size.readingColumn, alignment: .leading)
+                            .padding(.horizontal, Space.page)
+                            .padding(.bottom, Space.s12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                                composerHeight = $0
+                            }
+                    }
+                }
+                .onChange(of: messages.last?.id, initial: true) { _, newest in
+                    if newest != nil { proxy.scrollTo(Self.transcriptEnd, anchor: .bottom) }
+                }
             }
         }
         .background(Color.stage)
-        .task { if ParityGate.olderMessages { await prefetch() } }
+        .onChange(of: thread) {
+            for message in embeddedMessages where history[message.id] != nil {
+                history[message.id] = message
+            }
+        }
+        .task { await loadHistory(before: nil) }
+        .task(id: olderCursor) {
+            if let olderCursor {
+                await loadHistory(before: olderCursor)
+            } else if loadedHistory, historyState.phase == .loading {
+                historyState.phase = .idle
+            }
+        }
     }
+
+    private var loadedHistory: Bool { historyState.lastSuccess != nil }
 
     /// More than two people: received messages carry their sender's name and picture.
     private var isGroup: Bool { (thread.participants?.count ?? 0) > 2 }
 
-    private var isFailed: Bool {
-        if case .failed = olderState.phase { return true }
-        return false
-    }
-
-    private func scrollToNewest(_ proxy: ScrollViewProxy) {
-        guard let last = messages.last?.messageId else { return }
-        proxy.scrollTo(last, anchor: .bottom)
-    }
-
-    /// Reveals the fetched page and fetches the one before it.
-    private func showOlder() async {
-        older += pending
-        pending = []
-        if pendingHasMore { await prefetch() }
-    }
-
-    private func prefetch() async {
-        guard let oldest = messages.first?.messageId else { return }
-        olderState.phase = .loading
+    private func loadHistory(before cursor: Int64?) async {
+        guard !Task.isCancelled else { return }
+        historyState.phase = .loading
         do {
             let threadId = thread.threadId
-            let list = try await model.fetch(key: "messages-\(threadId)-\(oldest)") { try await $0.messages(threadId: threadId, before: oldest) }
-            let known = Set(messages.map(\.messageId))
-            pending = list.messages.filter { !known.contains($0.messageId) }
-            pendingHasMore = list.hasMore && !pending.isEmpty
-            olderState = CollectionState(phase: .idle, lastSuccess: Date())
+            let pageSize = Self.historyPageSize
+            let key = "messages-\(threadId)-\(cursor.map(String.init) ?? "latest")"
+            let list = try await model.fetch(key: key) {
+                try await $0.messages(threadId: threadId, before: cursor, pageSize: pageSize)
+            }
+            try Task.checkCancellation()
+            let page = list.messages.filter { message in
+                cursor.map { message.id < $0 } ?? true
+            }
+            for message in page {
+                history[message.id] = message
+            }
+            hasMoreHistory = list.hasMore && (cursor == nil || !page.isEmpty)
+            historyState = CollectionState(phase: .idle, lastSuccess: Date())
+        } catch is CancellationError {
         } catch {
-            olderState.phase = .failed(model.message(for: error))
+            guard !Task.isCancelled else { return }
+            historyState.phase = .failed(model.message(for: error))
         }
-    }
-}
-
-/// A borderless button above the transcript that reveals the page of earlier messages.
-private struct OlderMessagesButton: View {
-    let isLoading: Bool
-    let action: () -> Void
-    @State private var isHovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Text("Earlier messages")
-                .font(Type.t12)
-                .foregroundStyle(Color.accent)
-                .opacity(isHovering ? 0.8 : 1)
-                .frame(height: Size.controlSmall)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
-        .onHover { isHovering = $0 }
-        .disabled(isLoading)
-        .help("Earlier messages")
-        .accessibilityLabel("Older messages")
     }
 }
 
@@ -453,8 +456,10 @@ struct MessagePlacement: Identifiable {
 
 private struct MessageRow: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let message: InstantMessage
+    let threadId: Int
     let placement: MessagePlacement
     let isGroup: Bool
     /// The sender's picture, resolved from the thread's participants.
@@ -578,29 +583,15 @@ private struct MessageRow: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(spokenLabel)
             }
-            if let name = message.attachmentName, !name.isEmpty {
-                HStack(spacing: Space.s6) {
-                    Image(systemName: Symbol.material)
-                        .font(.system(size: 12, weight: .regular))
-                        .foregroundStyle(inkMuted)
-                        .accessibilityHidden(true)
-                    Text(name)
-                        .font(Type.t12)
-                        .foregroundStyle(ink)
-                        .lineLimit(1)
-                    if let url = model.absoluteURL(message.attachmentUrl) {
-                        IconButton(Symbol.open, label: "Open on the website") { NSWorkspace.shared.open(url) }
-                            .foregroundStyle(inkMuted)
-                    }
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel((message.text ?? "").isBlank ? spokenLabel : name)
-            }
+            if !isDeleted { attachment }
             if let link = message.link, let url = model.absoluteURL(link) {
                 Link(message.linkTitle.flatMap { $0.isEmpty ? nil : $0 } ?? link, destination: url)
                     .font(Type.t12)
                     .foregroundStyle(ink)
                     .underline()
+                    .environment(\.openURL, OpenURLAction { url in
+                        navigation.openSiteLink(url) ? .handled : .systemAction
+                    })
             }
         }
         .padding(.horizontal, Space.s12)
@@ -614,6 +605,61 @@ private struct MessageRow: View {
             }
         }
         .frame(maxWidth: Self.bubbleWidth, alignment: isMine ? .trailing : .leading)
+    }
+
+    @ViewBuilder private var attachment: some View {
+        let url = model.absoluteURL(message.attachmentUrl)
+        let name = message.attachmentName.flatMap { $0.isBlank ? nil : $0 }
+        if name != nil || url != nil {
+            let title = name ?? String(localized: "Attachment")
+            let state = model.downloadStates[AppModel.messageAttachmentKey(message.messageId)]
+            let canOpen = if let url, let origin = model.site?.baseURL {
+                FileAcquirer.canAcquireAttachment(at: url, origin: origin)
+            } else { false }
+            let failed = if case .failed = state { true } else { state == .websiteOnly }
+            VStack(alignment: .leading, spacing: Space.s4) {
+                HStack(spacing: Space.s6) {
+                    if canOpen {
+                        Button {
+                            Task { await model.openMessageAttachment(message, threadId: threadId) }
+                        } label: {
+                            attachmentLabel(title)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(state == .downloading)
+                        .help("Open in Laer")
+                    } else {
+                        attachmentLabel(title)
+                    }
+                    if state == .downloading { Spinner() }
+                    if let url, !canOpen || failed {
+                        IconButton(Symbol.open, label: "Open on the website") { NSWorkspace.shared.open(url) }
+                            .foregroundStyle(inkMuted)
+                    }
+                }
+                if failed {
+                    Text("The attachment couldn’t be opened in Laer.")
+                        .font(Type.t12)
+                        .foregroundStyle(inkMuted)
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel((message.text ?? "").isBlank ? spokenLabel : title)
+        }
+    }
+
+    private func attachmentLabel(_ title: String) -> some View {
+        HStack(spacing: Space.s6) {
+            Image(systemName: Symbol.file(extension: (title as NSString).pathExtension))
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(inkMuted)
+                .accessibilityHidden(true)
+            Text(title)
+                .font(Type.t12)
+                .foregroundStyle(ink)
+                .lineLimit(1)
+        }
     }
 
     @ViewBuilder private var starMark: some View {
@@ -714,33 +760,14 @@ private struct ReplyComposer: View {
     @State private var files: [PickedFile] = []
     @State private var action = WriteAction()
     @State private var pickError: String?
-    @FocusState private var focused: Bool
 
     private var canSend: Bool { !action.isRunning && (!text.isBlank || !files.isEmpty) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s6) {
-            AttachmentList(files: $files)
-            HStack(alignment: .bottom, spacing: Space.s8) {
-                IconButton(Symbol.attach, label: "Attach files") { attach() }
-                TextField("Reply", text: textBinding, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(Type.body)
-                    .foregroundStyle(Color.text)
-                    .lineLimit(1...6)
-                    .focused($focused)
-                    .padding(.horizontal, Space.s8)
-                    .padding(.vertical, Space.s4)
-                    .frame(maxWidth: .infinity, minHeight: Size.control, alignment: .leading)
-                    .fieldChrome(focused: focused)
-                    .contentShape(Rectangle())
-                    .onTapGesture { focused = true }
-                    .accessibilityLabel("Reply")
-                if action.isRunning { Spinner() }
-                TextButton("Send", role: .primary) { Task { await send() } }
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!canSend)
-            }
+            AttachmentList(files: $files).disabled(action.isRunning)
+            MessageComposerBar(label: "Reply", text: textBinding, canSend: canSend, isSending: action.isRunning,
+                               onAttach: attach, onSend: { Task { await send() } })
             if case .failed(let message) = action.phase { ErrorLine(message) }
             if let pickError { ErrorLine(pickError) }
         }

@@ -60,6 +60,7 @@ private struct GeneralSettings: View {
     @Environment(AppModel.self) private var model
     @AppStorage(Appearance.key) private var appearance = Appearance.system
     @AppStorage(LaerApp.showsMenuBarKey) private var showsMenuBarExtra = true
+    @AppStorage(AppModel.fetchesAheadKey) private var fetchesAhead = true
     @State private var confirmsBriefsOff = false
 
     var body: some View {
@@ -69,6 +70,13 @@ private struct GeneralSettings: View {
                     ForEach(Appearance.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 Toggle("Show Laer in the menu bar", isOn: $showsMenuBarExtra)
+            }
+            Section {
+                Toggle(isOn: $fetchesAhead) {
+                    Text("Get files before you open them")
+                    Text("Finds download links for files on screen and saves the next lessons’ readings, so they open at once. Off: only files you click are fetched.")
+                }
+                .onChange(of: fetchesAhead) { if !fetchesAhead { model.stopFetchingAhead() } }
             }
             // Shown only where Apple's on-device model can run (decision 0014).
             if model.briefs.isAvailable {

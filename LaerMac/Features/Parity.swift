@@ -11,8 +11,6 @@ enum ParityGate {
     static let participants = false
     /// `calendar/events/v1` passes with `fromDate`, which the client always sends.
     static let personalCalendar = true
-    /// `messages/v3` passes; older messages load on request.
-    static let olderMessages = true
     /// `assignments/{id}/v1` passes for CustomActivity tasks; 403 means the task is not an assignment.
     static let assignments = true
     /// Pass with OAuth sign-in. See docs/feasibility.md.
@@ -167,6 +165,7 @@ enum RichTextCache {
 /// paragraph, list and heading in it. Links open through the app's own link handling.
 struct RichTextView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     let blocks: [RichBlock]
     var tone: RichTextTone = .page
     var hugsWidth = false
@@ -183,7 +182,7 @@ struct RichTextView: View {
 
     var body: some View {
         RichTextBody(blocks: blocks, tone: tone, hugsWidth: hugsWidth) { link in
-            if let url = resolve(link) { NSWorkspace.shared.open(url) }
+            if let url = resolve(link), !navigation.openSiteLink(url) { NSWorkspace.shared.open(url) }
         }
     }
 

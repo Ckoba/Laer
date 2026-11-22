@@ -306,7 +306,7 @@ final class RouteProbe {
             await write()
             let t1 = Date()
             do {
-                let pdf = try await SlideConverter().convert(fileURL, id: "probe-\(item.id)")
+                let pdf = try await OfficePDFConverter.convert(fileURL, id: "probe-\(item.id)")
                 let document = PDFDocument(url: pdf)
                 let page = document?.page(at: 0)?.bounds(for: .mediaBox) ?? .zero
                 add("V", "convert", outcome: "\(document?.pageCount ?? 0) pages", detail: "\(Int(page.width))x\(Int(page.height)), \(Int(Date().timeIntervalSince(t1)))s")

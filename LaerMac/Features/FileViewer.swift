@@ -11,47 +11,71 @@ struct ViewerSplit<Detail: View>: View {
     @ViewBuilder var detail: () -> Detail
     @State private var dragStartWidth: CGFloat?
     @State private var isOverHandle = false
+    @State private var toggleCount = 0
 
     private let minPanel: CGFloat = 320
     /// Dragging within this distance of the far edge fills the space.
     private let snapToFull: CGFloat = 200
 
     var body: some View {
-        GeometryReader { proxy in
-            let total = proxy.size.width
-            let hasFile = model.viewerItem != nil
-            let panel = hasFile ? panelWidth(total: total) : 0
-            HStack(spacing: 0) {
-                detail()
-                    .frame(width: max(total - panel, 0))
-                    .opacity(total - panel < 1 ? 0 : 1)
-                    .clipped()
-                if hasFile {
-                    FileViewerHost()
-                        .frame(width: panel)
-                        .background(Color.viewerPanel)
-                        .overlay(alignment: .leading) { resizeHandle(total: total) }
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
+        let hasFile = model.viewerItem != nil
+        let target: CGFloat = model.viewerIsFull ? 1 : 0
+        ReaderExpansion(progress: target) { progress in
+            GeometryReader { proxy in
+                let total = proxy.size.width
+                let split = splitPanelWidth(total: total)
+                let expansion = dragStartWidth == nil ? progress : target
+                let panel = hasFile ? split + (total - split) * expansion : 0
+                let detailWidth = max(total - panel, 0)
+                HStack(spacing: 0) {
+                    detail()
+                        .frame(width: detailWidth, alignment: .topLeading)
+                        .clipped()
+                        .contentShape(Rectangle())
+                        .allowsHitTesting(detailWidth >= 1)
+                        .accessibilityHidden(detailWidth < 1)
+                    if hasFile {
+                        FileViewerHost(onToggleFull: toggleFull)
+                            .frame(width: panel)
+                            .background(Color.stage)
+                            .overlay(alignment: .leading) { resizeHandle(total: total, panel: panel) }
+                            .clipped()
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
+                }
+                .transaction(value: progress) { transaction in
+                    // The pane widths already describe this animation frame.
+                    if hasFile { transaction.animation = nil }
                 }
             }
         }
+        // Pair the reader's motion with the sidebar collapsing or opening alongside it.
+        .motion(model.viewerIsFull ? Motion.sidebarCollapse : Motion.sidebarExpand, value: toggleCount)
+        .transaction(value: model.viewerIsFull) { transaction in
+            // Drag snaps update the reader immediately, even while the sidebar animates.
+            if hasFile { transaction.animation = nil }
+        }
     }
 
-    private func panelWidth(total: CGFloat) -> CGFloat {
-        if model.viewerIsFull { return total }
+    private func toggleFull() {
+        toggleCount += 1
+        model.viewerIsFull.toggle()
+    }
+
+    private func splitPanelWidth(total: CGFloat) -> CGFloat {
         let minimum = min(minPanel, total)
         let maximum = max(minimum, total - snapToFull)
         return min(max(model.viewerWidth ?? total * 0.62, minimum), maximum)
     }
 
-    private func resizeHandle(total: CGFloat) -> some View {
+    private func resizeHandle(total: CGFloat, panel: CGFloat) -> some View {
         // The line sits on the panel's own leading edge, so the strip and the page share it. No line when
         // the file fills the window; the drag still works over the same 10pt.
         Color.clear
             .frame(width: 10)
             .overlay(alignment: .leading) {
                 Rectangle()
-                    .fill(model.viewerIsFull ? Color.clear : (isOverHandle ? Color.borderStrong : Color.border))
+                    .fill(total - panel < 1 ? Color.clear : (isOverHandle ? Color.borderStrong : Color.border))
                     .frame(width: 1)
             }
             .overlay(alignment: .leading) {
@@ -76,7 +100,7 @@ struct ViewerSplit<Detail: View>: View {
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in
-                        let start = dragStartWidth ?? panelWidth(total: total)
+                        let start = dragStartWidth ?? panel
                         dragStartWidth = start
                         let width = start - value.translation.width
                         let isFull = total - width < snapToFull
@@ -90,9 +114,25 @@ struct ViewerSplit<Detail: View>: View {
     }
 }
 
+/// Samples the reader's expansion independently of the available width, which the sidebar can change.
+private struct ReaderExpansion<Content: View>: View, Animatable {
+    nonisolated var progress: CGFloat
+    @ViewBuilder var content: (CGFloat) -> Content
+
+    nonisolated var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    var body: some View {
+        content(min(max(progress, 0), 1))
+    }
+}
+
 /// Tabs for open files, one menu, and Close.
 struct FileViewerHost: View {
     @Environment(AppModel.self) private var model
+    let onToggleFull: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -108,24 +148,19 @@ struct FileViewerHost: View {
                 }
                 IconButton(
                     model.viewerIsFull ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
-                    label: model.viewerIsFull ? "Restore split view" : "Expand reader"
-                ) { model.viewerIsFull.toggle() }
+                    label: model.viewerIsFull ? "Restore split view" : "Expand reader",
+                    action: onToggleFull
+                )
                     .help(model.viewerIsFull ? "Restore side-by-side view" : "Expand reader. You can also drag the divider left.")
                     .accessibilityIdentifier("viewer.toggleFull")
                 if let item = model.viewerItem, item.fileURL != nil {
-                    FileMenu(item: item)
+                    FileMenu(item: item, onToggleFull: onToggleFull)
                 }
                 // Tab closes are the small x on each tab; this one closes the whole reader.
                 IconButton(Symbol.close, label: "Close file", help: "Close reader") { model.closeViewer() }
             }
             .padding(.horizontal, Space.s8)
             .frame(height: 44)
-            // The toolbar is the same surface as the document area below it, not a lighter strip.
-            .background(Color.chrome)
-            // The one line between the tab strip and the document; both share the surface's edges.
-            Rectangle()
-                .fill(Color.border)
-                .frame(height: 1)
             ZStack {
                 // Open tabs stay alive, so each keeps its page and zoom.
                 ForEach(model.viewerTabs) { item in
@@ -220,21 +255,22 @@ private struct FileTab: View {
 private struct FileMenu: View {
     @Environment(AppModel.self) private var model
     let item: ViewerItem
+    let onToggleFull: () -> Void
 
     private var source: URL { model.shownURL(for: item) ?? URL(fileURLWithPath: "/") }
     private var converted: URL? { model.convertedFiles[item.id] }
-    private var showsOriginal: Bool { model.slidesShownAsOriginal.contains(item.id) }
+    private var showsOriginal: Bool { model.officeFilesShownAsOriginal.contains(item.id) }
 
     var body: some View {
         Menu {
-            Button(model.viewerIsFull ? "Exit full size" : "Full size") { model.viewerIsFull.toggle() }
+            Button(model.viewerIsFull ? "Exit full size" : "Full size", action: onToggleFull)
                 .keyboardShortcut("f", modifiers: [.shift, .command])
-            if item.isSlides, converted != nil {
-                Button(showsOriginal ? "View as PDF" : "View as PowerPoint") {
+            if item.supportsPDFConversion, converted != nil {
+                Button(showsOriginal ? "View as PDF" : (item.isWord ? "View as Word" : "View as PowerPoint")) {
                     if showsOriginal {
-                        model.slidesShownAsOriginal.remove(item.id)
+                        model.officeFilesShownAsOriginal.remove(item.id)
                     } else {
-                        model.slidesShownAsOriginal.insert(item.id)
+                        model.officeFilesShownAsOriginal.insert(item.id)
                     }
                 }
             }
@@ -270,13 +306,13 @@ private struct FileMenu: View {
         .help("File actions")
     }
 
-    /// Slides with a PDF copy ask which to save, starting from the one on screen.
+    /// Office files with a PDF copy ask which to save, starting from the one on screen.
     private func export() {
         let panel = NSSavePanel()
         let base = (item.title as NSString).deletingPathExtension
         let name = base.isEmpty ? item.title : base
         var choices = [source]
-        if item.isSlides, let converted, let original = item.fileURL {
+        if item.supportsPDFConversion, let converted, let original = item.fileURL {
             choices = showsOriginal ? [original, converted] : [converted, original]
         }
         let picker = ExportFormatPicker(panel: panel, name: name, choices: choices)
@@ -293,9 +329,9 @@ private struct FileMenu: View {
 }
 
 extension AppModel {
-    /// What the viewer shows for a file: the PDF copy of a slide deck unless the person chose the original.
+    /// The converted PDF unless the person chose to view the original.
     func shownURL(for item: ViewerItem) -> URL? {
-        if slidesShownAsOriginal.contains(item.id) { return item.fileURL }
+        if officeFilesShownAsOriginal.contains(item.id) { return item.fileURL }
         return convertedFiles[item.id] ?? item.fileURL
     }
 
@@ -332,7 +368,14 @@ private final class ExportFormatPicker: NSObject {
         super.init()
         for url in choices {
             let ext = url.pathExtension.lowercased()
-            popup.addItem(withTitle: ext == "pdf" ? "PDF" : "PowerPoint (.\(ext))")
+            let label = if ext == "pdf" {
+                "PDF"
+            } else if ViewerItem.wordExtensions.contains(ext) {
+                "Word (.\(ext))"
+            } else {
+                "PowerPoint (.\(ext))"
+            }
+            popup.addItem(withTitle: label)
         }
         popup.target = self
         popup.action = #selector(changed)
@@ -345,7 +388,9 @@ private final class ExportFormatPicker: NSObject {
 
 enum ViewerFiles {
     /// Named copies hold course files, so they don't outlive the account's session.
+    @MainActor
     static func removeDerivedFiles() {
+        OfficePDFConverter.removeCachedFiles()
         guard let caches = try? FileManager.default.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: false) else { return }
         for name in ["NamedFiles", "ConvertedSlides"] {
             try? FileManager.default.removeItem(at: caches.appending(path: name, directoryHint: .isDirectory))
@@ -373,22 +418,34 @@ enum ViewerFiles {
     }
 }
 
-/// One open file. Slides turn into a PDF in the background, and Quick Look shows them until then.
+/// One open file. Office files use Quick Look if a PDF preview is unavailable.
 private struct FileContent: View {
     @Environment(AppModel.self) private var model
     let item: ViewerItem
     let isCurrent: Bool
-    @State private var isConverting = false
+    @State private var conversion: OfficePDFConverter?
+    @State private var conversionFailed = false
 
     private var displayURL: URL? { model.shownURL(for: item) }
+
+    private var officePreview: OfficePDFConverter? {
+        guard let conversion, conversion.source == item.fileURL, conversion.hasPreview,
+              !model.officeFilesShownAsOriginal.contains(item.id) else { return nil }
+        return conversion
+    }
 
     var body: some View {
         Group {
             if item.isNewTab {
                 NewTabPage()
-            } else if let displayURL, displayURL.pathExtension.lowercased() == "pdf" {
-                PDFPanel(url: displayURL, fileId: item.id, startPage: item.startPage, searchMatch: item.searchMatch, isCurrent: isCurrent)
-                    .id(displayURL)
+            } else if displayURL?.pathExtension.lowercased() == "pdf" || officePreview != nil || item.firstPDFPage != nil {
+                PDFPanel(url: displayURL, fileId: item.id, startPage: item.startPage,
+                         searchMatch: item.searchMatch, isCurrent: isCurrent, office: officePreview,
+                         firstPDFPage: item.firstPDFPage)
+                    .id(item.openingID.map(AnyHashable.init) ?? AnyHashable(item.fileURL))
+            } else if item.supportsPDFConversion,
+                      !model.officeFilesShownAsOriginal.contains(item.id), !conversionFailed {
+                Spinner().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let displayURL {
                 QuickLookContent(url: displayURL)
             } else {
@@ -396,26 +453,27 @@ private struct FileContent: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .overlay(alignment: .topTrailing) {
-            if isConverting {
-                Spinner().padding(Space.s12)
-            }
-        }
         .task(id: item.fileURL) { await convertIfNeeded() }
     }
 
     private func convertIfNeeded() async {
-        if let cached = SlideConverter.cachedPDF(for: item.id) {
+        conversionFailed = false
+        guard item.supportsPDFConversion, let source = item.fileURL else { return }
+        if let cached = OfficePDFConverter.cachedPDF(for: source, id: item.id) {
             model.convertedFiles[item.id] = cached
             return
         }
-        guard item.isSlides, !item.isNewTab, let source = item.fileURL else { return }
-        isConverting = true
-        defer { isConverting = false }
-        // If this fails, Quick Look keeps showing the slides.
-        if let pdf = try? await SlideConverter().convert(source, id: item.id) {
-            model.convertedFiles[item.id] = pdf
+        let job = OfficePDFConverter.conversion(for: source, id: item.id)
+        conversion = job
+        let result = try? await job.result()
+        guard !Task.isCancelled, conversion === job,
+              model.viewerTabs.contains(where: { $0.id == item.id && $0.fileURL == source }) else { return }
+        if let result {
+            model.convertedFiles[item.id] = result
+        } else {
+            conversionFailed = true
         }
+        conversion = nil
     }
 }
 
@@ -448,9 +506,11 @@ private enum PDFControllers {
 private final class LaerPDFView: PDFView {
     var onRotate: ((PDFPage?, Bool, Bool) -> Void)?
     var onReset: (() -> Void)?
+    var allowsRotation = true
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event) ?? NSMenu()
+        guard allowsRotation else { return menu }
         let page = self.page(for: convert(event.locationInWindow, from: nil), nearest: true)
         menu.addItem(.separator())
         for (title, all, clockwise) in [("Rotate Page Left", false, false), ("Rotate Page Right", false, true),
@@ -477,30 +537,34 @@ private final class LaerPDFView: PDFView {
 
 /// Holds the PDF view, so the page and its thumbnails share one document.
 @MainActor
-@Observable
-private final class PDFController {
-    let view: PDFView
-    private(set) var pageCount = 0
-    private(set) var pageIndex = 0
-    /// Bumps when pages turn, so the thumbnails redraw.
-    private(set) var revision = 0
-    @ObservationIgnored private var observer: NSObjectProtocol?
+private final class PDFController: ObservableObject {
+    let view: LaerPDFView
+    @Published private(set) var pageCount = 0
+    @Published private(set) var pageIndex = 0
+    /// Bumps when pages change so the thumbnails redraw.
+    @Published private(set) var revision = 0
+    @Published private(set) var allowsRotation = true {
+        didSet { view.allowsRotation = allowsRotation }
+    }
+    private var observer: NSObjectProtocol?
     /// Quarter turns the person added, by page index, on top of the file's own rotation.
-    @ObservationIgnored private var added: [Int: Int] = [:]
-    @ObservationIgnored private let fileId: String
+    private var added: [Int: Int] = [:]
+    private let fileId: String
+    private var hasCover = false
+    private var showsDownloadPreview = false
 
     private static let rotationsKey = "viewerPageRotations"
 
     var hasRotation: Bool { added.values.contains { $0 % 360 != 0 } }
 
-    init(url: URL, fileId: String) {
+    init(fileId: String) {
         self.fileId = fileId
         let pdfView = LaerPDFView()
         view = pdfView
         view.autoScales = true
         view.displayMode = .singlePageContinuous
         view.displaysPageBreaks = true
-        // A soft shadow and a 12pt gap lift each page off the grey canvas in both appearances.
+        // A soft shadow and a 12pt gap separate the pages from the reading surface.
         view.pageShadowsEnabled = true
         view.pageBreakMargins = NSEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
         view.minScaleFactor = 0.25
@@ -516,29 +580,140 @@ private final class PDFController {
         pdfView.onReset = { [weak self] in self?.resetRotation() }
     }
 
+    isolated deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+    }
+
     /// Opening a large document can take a moment, so it happens away from the main thread.
     func load(_ url: URL) async {
-        guard view.document == nil else { return }
+        guard view.document == nil || showsDownloadPreview else { return }
         let box = await Task.detached(priority: .userInitiated) { DocumentBox(PDFDocument(url: url)) }.value
-        added = Self.savedRotations(for: fileId)
-        if let document = box.document {
-            for (index, turn) in added where index < document.pageCount {
-                if let page = document.page(at: index) { page.rotation = Self.normalized(page.rotation + turn) }
+        guard !Task.isCancelled, let document = box.document else { return }
+        if showsDownloadPreview, let preview = view.document?.page(at: 0), let first = document.page(at: 0) {
+            let scale = view.scaleFactor
+            let autoScales = view.autoScales
+            keepingPlace(from: preview, to: first, in: document) {
+                install(document)
+                if !autoScales {
+                    view.autoScales = false
+                    view.scaleFactor = scale
+                }
             }
+            showsDownloadPreview = false
+            allowsRotation = true
+            revision += 1
+        } else {
+            install(document)
         }
-        view.document = box.document
+        if pageCount > 0 { Perf.mark("PDF document loaded") }
+    }
+
+    func showDownloadPreview(_ data: Data) {
+        guard view.document == nil, let document = PDFDocument(data: data), !document.isLocked,
+              document.pageCount == 1, document.page(at: 0) != nil else { return }
+        showsDownloadPreview = true
+        allowsRotation = false
+        install(document)
+        Perf.mark("PDF first page usable")
+    }
+
+    func showPages(from office: OfficePDFConverter) {
+        if allowsRotation != office.isFinished { allowsRotation = office.isFinished }
+
+        let installed = view.document != nil
+        let document = view.document ?? PDFDocument()
+        if !installed, office.capturedPages.isEmpty,
+           let bytes = office.coverPDF, let page = PDFDocument(data: bytes)?.page(at: 0) {
+            document.insert(page, at: 0)
+            hasCover = true
+        }
+
+        let replacedCover: Bool
+        if hasCover, let bytes = office.capturedPages.first, let page = PDFDocument(data: bytes)?.page(at: 0) {
+            replaceCover(with: page, in: document)
+            hasCover = false
+            replacedCover = true
+        } else {
+            replacedCover = false
+        }
+
+        for bytes in office.capturedPages.dropFirst(document.pageCount) {
+            guard let page = PDFDocument(data: bytes)?.page(at: 0) else { break }
+            if installed { applyRotation(to: page, at: document.pageCount) }
+            document.insert(page, at: document.pageCount)
+        }
+
+        guard document.pageCount > 0 else { return }
+        if !installed {
+            install(document)
+            Perf.mark("office first PDF page usable")
+        } else if pageCount != document.pageCount || replacedCover {
+            if pageCount != document.pageCount { view.layoutDocumentView() }
+            pageCount = document.pageCount
+            revision += 1
+        }
+    }
+
+    private func replaceCover(with page: PDFPage, in document: PDFDocument) {
+        guard let cover = document.page(at: 0) else { return }
+        keepingPlace(from: cover, to: page, in: document) {
+            document.removePage(at: 0)
+            applyRotation(to: page, at: 0)
+            document.insert(page, at: 0)
+            view.layoutDocumentView()
+        }
+    }
+
+    /// A stand-in first page gives way to the real one where the reader was, with their selection.
+    private func keepingPlace(from old: PDFPage, to new: PDFPage, in document: PDFDocument, _ swap: () -> Void) {
+        let viewport = view.currentDestination?.point
+        let selected = selection(on: old)
+        swap()
+        if let viewport { view.go(to: PDFDestination(page: new, at: viewport)) }
+        restoreSelection(selected, on: new, in: document)
+    }
+
+    private func selection(on page: PDFPage) -> (text: String, ranges: [NSRange])? {
+        guard let selection = view.currentSelection, let text = selection.string else { return nil }
+        let ranges = (0..<selection.numberOfTextRanges(on: page)).map { selection.range(at: $0, on: page) }
+        return (text, ranges)
+    }
+
+    private func restoreSelection(_ selected: (text: String, ranges: [NSRange])?, on page: PDFPage, in document: PDFDocument) {
+        guard let selected, !selected.ranges.isEmpty else { return }
+        let restored = PDFSelection(document: document)
+        let pieces = selected.ranges.compactMap { range -> PDFSelection? in
+            guard range.location != NSNotFound, NSMaxRange(range) <= page.numberOfCharacters else { return nil }
+            return page.selection(for: range)
+        }
+        restored.add(pieces)
+        if restored.string == selected.text {
+            view.setCurrentSelection(restored, animate: false)
+        }
+    }
+
+    private func install(_ document: PDFDocument) {
+        added = Self.savedRotations(for: fileId)
+        for index in added.keys where index < document.pageCount {
+            if let page = document.page(at: index) { applyRotation(to: page, at: index) }
+        }
+        view.document = document
         for case let scroll as NSScrollView in view.subviews {
             scroll.automaticallyAdjustsContentInsets = false
             scroll.contentInsets = NSEdgeInsets()
         }
-        pageCount = box.document?.pageCount ?? 0
+        pageCount = document.pageCount
         // Fit to the panel again now that the page size is known.
         refit()
     }
 
+    private func applyRotation(to page: PDFPage, at index: Int) {
+        if let turn = added[index] { page.rotation = Self.normalized(page.rotation + turn) }
+    }
+
     /// Nil pages means every page. The page in view stays in view.
     func rotate(pages: [PDFPage]?, by degrees: Int) {
-        guard let document = view.document else { return }
+        guard allowsRotation, let document = view.document else { return }
         let targets = pages ?? (0..<document.pageCount).compactMap { document.page(at: $0) }
         let anchor = view.currentPage
         for page in targets {
@@ -550,7 +725,7 @@ private final class PDFController {
     }
 
     func resetRotation() {
-        guard let document = view.document, hasRotation else { return }
+        guard allowsRotation, let document = view.document, hasRotation else { return }
         let anchor = view.currentPage
         for (index, turn) in added {
             if let page = document.page(at: index) { page.rotation = Self.normalized(page.rotation - turn) }
@@ -568,7 +743,7 @@ private final class PDFController {
     }
 
     func refitKeeping(pageAt index: Int) {
-        refit()
+        if view.autoScales { refit() }
         go(toPage: index)
     }
 
@@ -619,11 +794,14 @@ private final class MonitorHolder {
 }
 
 private struct PDFPanel: View {
-    let url: URL
+    let url: URL?
     let startPage: Int?
     let searchMatch: String?
     let isCurrent: Bool
-    @State private var controller: PDFController
+    let office: OfficePDFConverter?
+    let firstPDFPage: Data?
+    @StateObject private var controller: PDFController
+    @State private var didOpenInitialPage = false
     @AppStorage("viewerPagesLocked") private var isLocked = false
     @State private var isOpen = false
     /// The page ticks show only while the pointer is over the document.
@@ -633,25 +811,26 @@ private struct PDFPanel: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var closeTask: Task<Void, Never>?
+    @State private var resizePage: Int?
 
     /// The ticks' width when closed, and the pages panel's width plus ticks when open.
     private let closedRegion: CGFloat = 26
     private let openRegion: CGFloat = 184
 
-    init(url: URL, fileId: String, startPage: Int?, searchMatch: String?, isCurrent: Bool) {
+    init(url: URL?, fileId: String, startPage: Int?, searchMatch: String?, isCurrent: Bool,
+         office: OfficePDFConverter?, firstPDFPage: Data?) {
         self.url = url
         self.startPage = startPage
         self.searchMatch = searchMatch
         self.isCurrent = isCurrent
-        _controller = State(initialValue: PDFController(url: url, fileId: fileId))
+        self.office = office
+        self.firstPDFPage = firstPDFPage
+        _controller = StateObject(wrappedValue: PDFController(fileId: fileId))
     }
 
     var body: some View {
         HStack(spacing: 0) {
             ZStack(alignment: .trailing) {
-                // One neutral reading background across the whole document area, so a white page reads as
-                // a page in both appearances. One even gutter on every side; the page's own shadow is the
-                // only edge, and the area runs to the surface's edges with no frame of its own.
                 PDFContent(view: controller.view)
                     .modifier(NoTopEdgeFade())
                     // The 12pt gutter is the same on every side in both appearances. Opening always scrolls
@@ -661,7 +840,6 @@ private struct PDFPanel: View {
                     .padding(.top, Space.s12)
                     .padding(.bottom, Space.s6)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.chrome)
                 if !isLocked {
                     HStack(spacing: Space.s4) {
                         if isOpen { pagesPanel.transition(.opacity) }
@@ -681,6 +859,9 @@ private struct PDFPanel: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("viewer.pdf")
+        .overlay(alignment: .topTrailing) {
+            if url == nil || office?.isFinished == false { Spinner().padding(Space.s12) }
+        }
         .overlay(alignment: .bottomLeading) {
             if startPage != nil, controller.pageCount > 0 {
                 Text("Page \(controller.pageIndex + 1) of \(controller.pageCount)")
@@ -694,7 +875,6 @@ private struct PDFPanel: View {
                     .accessibilityLabel("Page \(controller.pageIndex + 1) of \(controller.pageCount)")
             }
         }
-        .background(Color.chrome)
         .background {
             GeometryReader { proxy in
                 Color.clear
@@ -702,28 +882,67 @@ private struct PDFPanel: View {
                     .onChange(of: proxy.frame(in: .global)) { _, new in frame = new }
             }
         }
-        .task {
-            await controller.load(url)
-            // Always land on a page, so the top gutter is the same whether or not a page was asked for.
-            controller.showSearchMatch(searchMatch, onPage: startPage ?? 0)
-        }
-        .onChange(of: startPage) { _, page in controller.showSearchMatch(searchMatch, onPage: page ?? 0) }
-        .onChange(of: searchMatch) { _, match in controller.showSearchMatch(match, onPage: startPage ?? 0) }
-        // Expanding or restoring resizes the page; keep the same page in view.
-        .onChange(of: model.viewerIsFull) {
-            guard isCurrent else { return }
-            let index = controller.pageIndex
-            Task {
-                try? await Task.sleep(for: .milliseconds(60))
-                controller.refitKeeping(pageAt: index)
+        .task(id: url) {
+            if let firstPDFPage { controller.showDownloadPreview(firstPDFPage) }
+            if office != nil {
+                updateOfficePages()
+            } else {
+                if let url { await controller.load(url) }
+                // Always land on a page, so the top gutter is the same whether or not a page was asked for.
+                if !didOpenInitialPage { openInitialPage() }
             }
+        }
+        .onChange(of: office?.capturedPages.count) { updateOfficePages() }
+        .onChange(of: office?.isFinished) { updateOfficePages() }
+        .onChange(of: office) { previous, current in
+            // The finished file takes the same panel. Attach any final pages before releasing their buffers.
+            if current == nil, let previous, previous.isFinished {
+                controller.showPages(from: previous)
+                if !didOpenInitialPage { openInitialPage() }
+            }
+        }
+        .onChange(of: startPage) { reopenInitialPage() }
+        .onChange(of: searchMatch) { reopenInitialPage() }
+        // Keep the starting page through rapid reversals and refit once the viewport settles.
+        .onChange(of: model.viewerIsFull) {
+            if isCurrent, resizePage == nil { resizePage = controller.pageIndex }
+        }
+        .task(id: isCurrent && resizePage != nil ? frame.width : nil) {
+            guard isCurrent, let page = resizePage else { return }
+            try? await Task.sleep(for: .milliseconds(60))
+            guard !Task.isCancelled else { return }
+            resizePage = nil
+            controller.refitKeeping(pageAt: page)
         }
         .onAppear(perform: startWatching)
         .onDisappear(perform: stopWatching)
-        // Registered here, not in the controller's init: SwiftUI builds and drops a controller each time
-        // this view is rebuilt, and a dropped one would replace the live one in the table.
-        .onAppear { PDFControllers.register(controller, for: url) }
-        .onChange(of: isCurrent) { if isCurrent { PDFControllers.register(controller, for: url) } }
+        .onAppear { registerController() }
+        .onChange(of: url) { registerController() }
+        .onChange(of: isCurrent) {
+            if isCurrent { registerController() }
+            else { resizePage = nil }
+        }
+    }
+
+    private func registerController() {
+        if let url { PDFControllers.register(controller, for: url) }
+    }
+
+    private func updateOfficePages() {
+        guard let office else { return }
+        controller.showPages(from: office)
+        if !didOpenInitialPage { openInitialPage() }
+    }
+
+    private func reopenInitialPage() {
+        didOpenInitialPage = false
+        openInitialPage()
+    }
+
+    private func openInitialPage() {
+        guard (startPage ?? 0) < controller.pageCount else { return }
+        controller.showSearchMatch(searchMatch, onPage: startPage ?? 0)
+        didOpenInitialPage = true
     }
 
     /// The PDF view takes hover events for itself, so the panel listens to pointer moves directly.
@@ -775,6 +994,7 @@ private struct PDFPanel: View {
                 .help("Rotate page. Hold ⌘ to rotate all pages.")
                 .accessibilityHint("Hold Command to rotate all pages")
                 .accessibilityIdentifier("viewer.rotate")
+                .disabled(!controller.allowsRotation)
                 IconButton(isLocked ? "lock" : "lock.open", label: isLocked ? "Unlock pages" : "Lock pages") {
                     isLocked.toggle()
                     isOpen = false
@@ -852,7 +1072,7 @@ private struct ThumbnailContent: NSViewRepresentable {
     }
 
     func updateNSView(_ view: PDFThumbnailView, context: Context) {
-        // Thumbnails don't notice a page turning, so they reattach to draw it again.
+        // Reattach when the document adds or rotates pages.
         guard context.coordinator.revision != revision else { return }
         context.coordinator.revision = revision
         view.pdfView = nil

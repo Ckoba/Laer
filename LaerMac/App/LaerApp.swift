@@ -2,6 +2,24 @@ import AppKit
 import SwiftUI
 
 @main
+enum LaerEntryPoint {
+    @MainActor
+    static func main() {
+        if NSClassFromString("XCTestCase") != nil {
+            TestHostApp.main()
+        } else {
+            LaerApp.main()
+        }
+    }
+}
+
+/// Empty host when Xcode injects the unit test bundle (`LaerMacTests`), skipping windows and startup side effects.
+private struct TestHostApp: App {
+    var body: some Scene {
+        Settings { EmptyView() }
+    }
+}
+
 struct LaerApp: App {
     @State private var model = AppModel()
     @State private var updater = Updater()

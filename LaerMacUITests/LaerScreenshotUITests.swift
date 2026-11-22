@@ -16,7 +16,7 @@ final class LaerScreenshotUITests: XCTestCase {
         app.launchArguments += [
             "-ApplePersistenceIgnoreState", "YES", "-LaerUITestReset", "YES",
             "-LaerFixtureMode", "YES", "-LaerFixtureStress", "YES", "-LaerUITestAppearance", appearance,
-            "-showsSidebar", "YES", "-viewerPagesLocked", "NO",
+            "-viewerPagesLocked", "NO",
             // The window comes back at the size the last run left it, and the dark walk ends at the
             // smallest; a set size keeps each walk independent of the one before.
             "-LaerUITestWindowSize", "1180x760",

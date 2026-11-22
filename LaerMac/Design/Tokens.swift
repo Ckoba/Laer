@@ -39,14 +39,15 @@ enum Size {
     static let readingMax: CGFloat = 760
     /// The one inset between a screen's edge and its title, cards and row text.
     static let contentInset: CGFloat = Space.page
-    /// Icons centre at 20, under the red window button. The sidebar starts here, so with
-    /// `Sidebar.sidebarInset` 8 and a row's own 8, its icons centre at 64, under green.
-    static let rail: CGFloat = 40
+    static let firstWindowButtonCenter: CGFloat = 20
     static let topBar: CGFloat = 44
     /// The source list's default width; the person can drag it between `sidebarMin` and `sidebarMax`.
     static let sidebar: CGFloat = 220
     static let sidebarMin: CGFloat = 180
     static let sidebarMax: CGFloat = 280
+    static let sidebarIconSlot: CGFloat = 24
+    static let sidebarSymbol: CGFloat = 17
+    static let courseMonogram: CGFloat = 22
     /// A list row's minimum height (`ListRow`).
     static let listRow: CGFloat = 44
     /// The one height of a page title's row, so every page's title sits on the same baseline.
@@ -54,19 +55,12 @@ enum Size {
     /// The frame's inset round the content card: the strip along the window's right and bottom
     /// edges, equal to the sidebar's row inset on the left.
     static let frameEdge: CGFloat = 8
-    /// Space between a rail tile and the rail's own edge (tiles are `rail - 2 * railMargin` wide).
-    static let railMargin: CGFloat = 2
-    /// A rail tile: a nav icon's selection fill, and a course's monogram tile.
-    static let railTile: CGFloat = rail - 2 * railMargin
-    /// The circle holding a course's two-letter monogram in the rail.
-    static let monogram: CGFloat = 28
     static let palette: CGFloat = 560
 }
 
 /// Interface text is 500, titles (15 and 17) 600, course text 400 (`body`).
 enum Type {
-    /// The two letters in a course's rail monogram.
-    static let rail: Font = .system(size: 11, weight: .semibold)
+    static let courseMonogram: Font = .system(size: 11, weight: .semibold)
     static let t11: Font = .system(size: 11, weight: .medium)
     static let t12: Font = .system(size: 12, weight: .medium)
     static let t13: Font = .system(size: 13, weight: .medium)
@@ -92,8 +86,6 @@ extension Color {
     static let chrome = dynamic(light: 0xF3F3F3, dark: 0x222222)
     /// The outer frame: the rail and top bar, and the thin strip along the right and bottom.
     static let rail = dynamic(light: 0xE2E2E2, dark: 0x2C2C2C)
-    /// The right panel.
-    static let viewerPanel = dynamic(light: 0xFAFAFA, dark: 0x1F1F1F)
     static let raised = dynamic(light: 0xF7F7F7, dark: 0x303030)
     static let border = dynamic(light: 0xE3E3E3, dark: 0x2E2E2E)
     static let borderStrong = dynamic(light: 0xCCCCCC, dark: 0x404040)
@@ -171,6 +163,8 @@ extension Color {
 enum Motion {
     static let fast: Animation = .timingCurve(0.2, 0, 0, 1, duration: 0.12)
     static let base: Animation = .timingCurve(0.2, 0, 0, 1, duration: 0.18)
+    static let sidebarCollapse: Animation = .smooth(duration: 0.25)
+    static let sidebarExpand: Animation = .smooth(duration: 0.32)
     static let slow: Animation = .timingCurve(0.2, 0, 0, 1, duration: 0.32)
     /// One spinner turn, in seconds. Linear; nothing else uses it.
     static let loopDuration: Double = 0.8

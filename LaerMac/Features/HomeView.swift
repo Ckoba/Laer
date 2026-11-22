@@ -1561,8 +1561,10 @@ struct HomeView: View {
     }
 
     private func openTask(_ task: StudyTask) {
-        if task.elementId == nil, let url = model.absoluteURL(task.url) {
-            NSWorkspace.shared.open(url)
+        if task.elementId != nil, task.opensAssignment ? ParityGate.assignments : ParityGate.pages {
+            navigation.open(task)
+        } else if let url = model.absoluteURL(task.url) {
+            if !navigation.openSiteLink(url, courseId: task.courseId) { NSWorkspace.shared.open(url) }
         } else {
             model.selection = .upcoming
         }
@@ -1757,7 +1759,7 @@ struct HomeView: View {
         if element.isResource != false {
             Task { await model.open(element, courseId: courseId) }
         } else if let url = model.absoluteURL(element.url) {
-            NSWorkspace.shared.open(url)
+            if !navigation.openSiteLink(url, courseId: courseId) { NSWorkspace.shared.open(url) }
         }
     }
 }

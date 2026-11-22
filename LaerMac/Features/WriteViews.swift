@@ -123,9 +123,6 @@ struct TextArea: View {
     let label: String
     @Binding var text: String
     var minHeight: CGFloat = 56
-    /// False when the area sits inside a surface that draws the edge itself.
-    var bordered = true
-    var onFocusChange: ((Bool) -> Void)?
     @FocusState private var isFocused: Bool
 
     /// Lines shown before the field grows, from the requested height.
@@ -141,21 +138,11 @@ struct TextArea: View {
             .padding(.horizontal, Space.s8)
             .padding(.vertical, Space.s6)
             .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
-            .modifier(OptionalFieldChrome(bordered: bordered, focused: isFocused))
+            .fieldChrome(focused: isFocused)
             // The padding around the text belongs to the field too.
             .contentShape(Rectangle())
             .onTapGesture { isFocused = true }
-            .onChange(of: isFocused) { _, focused in onFocusChange?(focused) }
             .accessibilityLabel(label)
-    }
-}
-
-private struct OptionalFieldChrome: ViewModifier {
-    let bordered: Bool
-    let focused: Bool
-
-    func body(content: Content) -> some View {
-        if bordered { content.fieldChrome(focused: focused) } else { content }
     }
 }
 
@@ -179,66 +166,75 @@ struct ConfirmInPlace: View {
 
 // MARK: - Message composer
 
-/// Replies in a thread. Sending is one action: attachments upload, then the message is sent once.
-struct MessageComposer: View {
-    @Environment(AppModel.self) private var model
-    let threadId: Int
-    let onSent: () async -> Void
-    @State private var text = ""
-    @State private var files: [PickedFile] = []
-    @State private var action = WriteAction()
-    @State private var pickError: String?
-
-    private var canSend: Bool {
-        !action.isRunning && (!text.isBlank || !files.isEmpty)
-    }
+/// The same composer controls for replies and new conversations.
+struct MessageComposerBar: View {
+    let label: String
+    @Binding var text: String
+    let canSend: Bool
+    let isSending: Bool
+    let onAttach: () -> Void
+    let onSend: () -> Void
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Space.s8) {
-            TextArea(label: "Reply", text: $text)
-            AttachmentList(files: $files)
-            HStack(spacing: Space.s8) {
-                IconButton(Symbol.attach, label: "Attach files") { attach() }
-                Spacer(minLength: Space.s8)
-                if action.isRunning { Spinner() }
-                if case .failed(let message) = action.phase { ErrorLine(message) }
-                if let pickError { ErrorLine(pickError) }
-                TextButton("Send", role: .primary) { Task { await send() } }
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!canSend)
+        let height = Size.control + Space.s4
+        let shape = RoundedRectangle(cornerRadius: height / 2, style: .continuous)
+        let outlineOpacity = (focused ? 0.20 : 0.08) + (contrast == .increased ? 0.28 : 0)
+        HStack(alignment: .bottom, spacing: Space.s8) {
+            Button(action: onAttach) {
+                Label("Attach files", systemImage: Symbol.add).labelStyle(.iconOnly)
             }
-        }
-        .padding(.top, Space.s12)
-        .unsentDraft(!text.isBlank || !files.isEmpty)
-    }
+            .buttonStyle(.bordered)
+            .help("Attach files")
+            .accessibilityLabel("Attach files")
+            .disabled(isSending)
 
-    private func attach() {
-        pickError = nil
-        do {
-            files += try PickedFile.pick()
-        } catch {
-            pickError = WriteText.failure(error)
-        }
-    }
-
-    private func send() async {
-        let body = text
-        let parts = files.map(\.part)
-        let threadId = threadId
-        let sent = await action.run {
-            _ = try await model.write { writer in
-                var ids: [String] = []
-                for part in parts {
-                    ids += try await writer.uploadMessageAttachment(part).map(\.fileId)
+            TextField(label, text: $text, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(Type.body)
+                .foregroundStyle(Color.text)
+                .lineLimit(1...6)
+                .focused($focused)
+                .focusEffectDisabled()
+                .padding(.horizontal, Space.s12)
+                .padding(.vertical, Space.s6)
+                .frame(maxWidth: .infinity, minHeight: height, alignment: .leading)
+                .background {
+                    if reduceTransparency {
+                        shape.fill(Color.raised)
+                    } else {
+                        shape.fill(Color.text.opacity(0.04))
+                            .background(.thinMaterial, in: shape)
+                    }
                 }
-                return try await writer.sendMessage(text: body, threadId: threadId, attachmentIds: ids)
+                .overlay {
+                    shape.strokeBorder(Color.text.opacity(outlineOpacity), lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
+                .contentShape(shape)
+                .onTapGesture { focused = true }
+                .accessibilityLabel(label)
+                .disabled(isSending)
+
+            Button(action: onSend) {
+                if isSending {
+                    Spinner().accessibilityHidden(true)
+                } else {
+                    Label("Send", systemImage: Symbol.send).labelStyle(.iconOnly)
+                }
             }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.accentFill)
+            .keyboardShortcut(.return, modifiers: .command)
+            .help("Send")
+            .accessibilityLabel("Send")
+            .accessibilityValue(isSending ? "Sending" : "")
+            .disabled(!canSend)
         }
-        if sent {
-            text = ""
-            files = []
-            await onSent()
-        }
+        .controlSize(.large)
+        .buttonBorderShape(.circle)
     }
 }
 
@@ -259,7 +255,6 @@ struct NewMessageView: View {
     @State private var action = WriteAction()
     @State private var pickError: String?
     @FocusState private var toFocused: Bool
-    @State private var bodyFocused = false
 
     private var canSend: Bool {
         !action.isRunning && !recipients.isEmpty
@@ -286,37 +281,21 @@ struct NewMessageView: View {
             }
             ScrollView {
                 column {
-                    VStack(alignment: .leading, spacing: Space.s8) {
-                        // Recipients and body are one surface with a hairline between, as in Mail.
-                        VStack(alignment: .leading, spacing: 0) {
-                            recipientsField
-                            Rectangle().fill(Color.border).frame(height: 1)
-                            TextArea(label: "Message", text: $text, minHeight: 96, bordered: false) { bodyFocused = $0 }
-                        }
-                        .clipShape(RoundedRectangle(cornerRadius: Radius.m, style: .continuous))
-                        .fieldChrome(focused: toFocused || bodyFocused)
-                        AttachmentList(files: $files)
-                    }
-                    .padding(.bottom, Space.s12)
+                    recipientsField
+                        .fieldChrome(focused: toFocused)
+                        .disabled(action.isRunning)
+                        .padding(.bottom, Space.s12)
                 }
             }
             Rectangle().fill(Color.border).frame(height: 1)
-            // The same footer as the thread's reply composer: 12pt insets, attach and Send on one baseline.
             column {
                 VStack(alignment: .leading, spacing: Space.s6) {
-                    HStack(alignment: .center, spacing: Space.s8) {
-                        // The paperclip itself, not its hover square, starts on the surface's edge.
-                        IconButton(Symbol.attach, label: "Attach files") {
+                    AttachmentList(files: $files).disabled(action.isRunning)
+                    MessageComposerBar(label: "Message", text: $text, canSend: canSend, isSending: action.isRunning,
+                        onAttach: {
                             pickError = nil
                             do { files += try PickedFile.pick() } catch { pickError = WriteText.failure(error) }
-                        }
-                        .padding(.leading, -Space.s6)
-                        Spacer(minLength: Space.s8)
-                        if action.isRunning { Spinner() }
-                        TextButton("Send", role: .primary) { Task { await send() } }
-                            .keyboardShortcut(.return, modifiers: .command)
-                            .disabled(!canSend)
-                    }
+                        }, onSend: { Task { await send() } })
                     if case .failed(let message) = action.phase { ErrorLine(message) }
                     if let pickError { ErrorLine(pickError) }
                 }

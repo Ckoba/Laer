@@ -10,6 +10,9 @@ struct ViewerItem: Identifiable, Hashable {
     /// A PDF page to show first, zero-based, such as a course's rows in an exam plan.
     var startPage: Int?
     var searchMatch: String?
+    /// Identifies this open while the preview gives way to the downloaded file.
+    var openingID: UUID? = nil
+    var firstPDFPage: Data? = nil
 
     /// A New tab page rather than a file.
     var isNewTab: Bool { id.hasPrefix(Self.newTabPrefix) }
@@ -20,8 +23,17 @@ struct ViewerItem: Identifiable, Hashable {
         ViewerItem(id: newTabPrefix + UUID().uuidString, title: "New tab", fileURL: nil)
     }
 
+    static let slideExtensions: Set<String> = ["ppt", "pptx", "key", "pps", "ppsx"]
+    static let wordExtensions: Set<String> = ["doc", "docx"]
+    private static let pdfConvertibleExtensions = slideExtensions.union(wordExtensions)
+
     var isPDF: Bool { fileURL?.pathExtension.lowercased() == "pdf" }
-    var isSlides: Bool { ["ppt", "pptx", "key", "pps", "ppsx"].contains(fileURL?.pathExtension.lowercased() ?? "") }
+    var isWord: Bool { Self.wordExtensions.contains(fileURL?.pathExtension.lowercased() ?? "") }
+    var supportsPDFConversion: Bool { Self.pdfConvertibleExtensions.contains(fileURL?.pathExtension.lowercased() ?? "") }
+
+    static func mayNeedPDFConversion(named filename: String) -> Bool {
+        pdfConvertibleExtensions.contains((filename as NSString).pathExtension.lowercased())
+    }
 
     /// Such as "PDF · 567 KB".
     var typeAndSize: String {

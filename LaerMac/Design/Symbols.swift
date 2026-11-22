@@ -18,6 +18,8 @@ enum Symbol {
     static let disclosure = "chevron.forward"
     static let more = "ellipsis.circle"
     static let attach = "paperclip"
+    static let add = "plus"
+    static let send = "arrow.up"
     static let compose = "square.and.pencil"
     static let star = "star"
     static let comment = "text.bubble"
@@ -46,7 +48,7 @@ enum Symbol {
     static let brief = "list.bullet.rectangle"
     static let appUpdate = "arrow.down.to.line.circle"
     static let rotate = "rotate.right"
-    static let newTab = "plus"
+    static let newTab = add
     static let resources = "folder"
     static let announcements = "megaphone"
 

@@ -492,6 +492,7 @@ private struct CurrentPlan: View {
                             .accessibilityIdentifier("plan.resource.\(element.id)")
                     }
                 }
+                .looksUpFilesAhead(plan: plan, courseId: courseId)
                 .undividedRows()
                 .padding(.leading, Space.s8)
                 .padding(.trailing, -Space.s8)
@@ -583,6 +584,7 @@ private struct PlanContents: View {
                 PlanElementRow(element: element, courseId: courseId)
                     .accessibilityIdentifier("plan.resource.\(element.id)")
             }
+            .looksUpFilesAhead(plan: plan, courseId: courseId)
             if let note, note.brief != nil || note.status == .noTeaching {
                 BriefBlock(note: note)
                     .padding(.horizontal, Space.s8)
@@ -594,9 +596,35 @@ private struct PlanContents: View {
     }
 }
 
-/// A file in a plan opens in the right panel. Folders and links open on the website.
+extension View {
+    /// The unsaved files on screen are looked up ahead of a click while this is shown. Decision 0020.
+    func looksUpFilesAhead(_ resources: [Resource], place: String) -> some View {
+        modifier(FilesAhead(resources: resources, place: place))
+    }
+
+    fileprivate func looksUpFilesAhead(plan: PlanPreview, courseId: Int) -> some View {
+        let files = (plan.elements ?? []).filter { $0.isFolder != true && $0.isResource != false }
+            .map { Resource(planElement: $0, courseId: courseId) }
+        return looksUpFilesAhead(files, place: "plan.\(courseId).\(plan.id)")
+    }
+}
+
+private struct FilesAhead: ViewModifier {
+    @Environment(AppModel.self) private var model
+    let resources: [Resource]
+    let place: String
+
+    func body(content: Content) -> some View {
+        content
+            .task(id: [place] + resources.map(\.id)) { model.lookUpLinksAhead(for: resources, place: place) }
+            .onDisappear { model.stopLinksAhead(place: place) }
+    }
+}
+
+/// A file in a plan opens in the right panel; supported links open in Laer.
 private struct PlanElementRow: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     let element: PlanPreview.Element
     let courseId: Int
     @State private var isOpening = false
@@ -649,6 +677,7 @@ private struct PlanElementRow: View {
             }
         }
         .accessibilityElement(children: .combine)
+        .onHover { if opensInApp { model.pointer(resource, isOver: $0) } }
         .contextMenu {
             if let url = model.absoluteURL(element.url) {
                 Button("Open on the website") { NSWorkspace.shared.open(url) }
@@ -660,7 +689,7 @@ private struct PlanElementRow: View {
 
     private func open() {
         if isWebsiteOnly, let url = model.absoluteURL(element.url) {
-            NSWorkspace.shared.open(url)
+            if !navigation.openSiteLink(url, courseId: courseId) { NSWorkspace.shared.open(url) }
         } else if opensInApp {
             isOpening = true
             Task {
@@ -782,6 +811,7 @@ struct UpcomingView: View {
 /// The Assignments screen and Home's Due section share it.
 struct TaskRow: View {
     @Environment(AppModel.self) private var model
+    @Environment(Navigation.self) private var navigation
     let task: StudyTask
     /// Draws the date in `Color.danger`. There is no "Overdue" word or badge.
     var isOverdue = false
@@ -807,7 +837,9 @@ struct TaskRow: View {
     private var opens: (() -> Void)? {
         switch primary {
         case .open: return onOpen
-        case .website(let url): return { NSWorkspace.shared.open(url) }
+        case .website(let url): return {
+            if !navigation.openSiteLink(url, courseId: task.courseId) { NSWorkspace.shared.open(url) }
+        }
         case .none: return nil
         }
     }

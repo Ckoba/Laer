@@ -102,7 +102,7 @@ struct WindowButtonWatch: NSViewRepresentable {
                currentContainer !== watchedContainer {
                 attach()
             }
-            // Slightly wider than the system 20, so green sits over the sidebar's icons.
+            // Match the spacing set for the window frame.
             let spacing: CGFloat = 22
             let themeFrame = window.contentView?.superview
             var moves: [(NSButton, NSPoint)] = []

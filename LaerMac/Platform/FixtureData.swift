@@ -149,8 +149,11 @@ enum ParityFixtures {
         case "notifications/v2":
             return FixtureTransport.page(#"""
             {"NotificationId": 1, "Text": "New update in Course one", "PublishedDate": "2026-10-30T10:00:00Z", "IsRead": false,
-             "PublishedBy": {"FullName": "Sam Teacher", "ProfileImageUrl": "\#(FixtureAvatars.samPath)"}, "Url": "/n/1"},
-            {"NotificationId": 2, "Text": "Plan updated", "PublishedDate": "2026-10-25T10:00:00Z", "IsRead": true}
+             "PublishedBy": {"FullName": "Sam Teacher", "ProfileImageUrl": "\#(FixtureAvatars.samPath)"},
+             "Url": "/ContentArea/ContentArea.aspx?LocationType=1&LocationID=11&FromNotification=true",
+             "ContentUrl": "/Course/Course.aspx?CourseID=11"},
+            {"NotificationId": 2, "Text": "Plan updated", "PublishedDate": "2026-10-25T10:00:00Z", "IsRead": true,
+             "ContentUrl": "/plans/courses/11/plan/601"}
             """#, count: 2)
         case "courses/{id}/bulletins/v1":
             if request.path.contains("/13/") { return FixtureTransport.page("", count: 0) }
@@ -184,6 +187,13 @@ enum ParityFixtures {
              {"Id": 40, "Label": "Course one", "TypeName": "Course", "CanReceive": true}]
             """#
         case "instantmessages/messagethreads/{id}/messages/v3":
+            if request.path.contains("/300/"), UserDefaults.standard.bool(forKey: "LaerFixturePaginatedMessages"),
+               !request.query.contains(where: { $0.name == "fromId" }) {
+                let items = (100..<130).reversed().map { id in
+                    #"{"MessageId": \#(id), "Text": "Recent history message \#(id)", "CreatedByName": "Sam Teacher"}"#
+                }.joined(separator: ",")
+                return #"{"HasMore": true, "Messages": \#(FixtureTransport.page(items, count: 30))}"#
+            }
             return #"""
             {"HasMore": false, "Messages": {"CurrentPageIndex": 0, "EntityArray": [
               {"MessageId": 5, "Text": "Earlier message", "CreatedByName": "Sam Teacher", "Created": "2026-10-01T09:00:00Z"}
@@ -241,6 +251,10 @@ final class FixtureWrites: @unchecked Sendable {
 
     func record(_ request: WriteRequest) {
         lock.withLock { requests.append(request) }
+    }
+
+    func reset() {
+        lock.withLock { requests.removeAll() }
     }
 
     var all: [WriteRequest] { lock.withLock { requests } }

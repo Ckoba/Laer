@@ -232,6 +232,140 @@ final class Navigation {
         current = HistoryEntry(place: place(model), expandedCourses: expandedCourses)
     }
 
+    /// Uses the notification's page URL first, then its embedded content URL.
+    /// Returns a browser fallback only when neither points to a native destination.
+    func openNotification(_ notification: ParityNotification) -> URL? {
+        guard let model else { return nil }
+        let urls = [notification.url, notification.contentUrl].compactMap(model.absoluteURL)
+        for url in urls {
+            if openSiteLink(url, courseId: nil, courseTab: .updates) { return nil }
+        }
+        return urls.first
+    }
+
+    func open(_ task: StudyTask) {
+        visit(.upcoming) { openTask = task }
+    }
+
+    @discardableResult
+    func openSiteLink(_ url: URL, courseId: Int? = nil) -> Bool {
+        openSiteLink(url, courseId: courseId, courseTab: .plans)
+    }
+
+    private func openSiteLink(_ url: URL, courseId: Int?, courseTab: CourseTab) -> Bool {
+        guard let model, let origin = model.site?.baseURL, AvatarSession.sameOrigin(url, origin),
+              let link = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return false }
+
+        func value(_ key: String) -> String? {
+            link.queryItems?.first { $0.name.caseInsensitiveCompare(key) == .orderedSame }?.value
+        }
+
+        func id(_ key: String) -> Int? { value(key).flatMap(Int.init).flatMap { $0 > 0 ? $0 : nil } }
+
+        let path = link.path.lowercased()
+        let segments = path.split(separator: "/")
+        if segments.count == 5, segments[0] == "plans", segments[1] == "courses", segments[3] == "plan",
+           let course = Int(segments[2]), let plan = Int(segments[4]), plan > 0 {
+            return visitCourse(course, tab: .plans, target: SearchHit(
+                id: "plan-\(course)-\(plan)", kind: .plan, title: "Plan", courseId: course,
+                destination: .plan(courseId: course, planId: plan)
+            ))
+        }
+
+        switch path {
+        case "/main.aspx", "/course/course.aspx", "/contentarea/contentarea.aspx", "/resources",
+             "/learningtoolelement/viewlearningtoolelement.aspx", "/customactivity/customactivityoverview.aspx":
+            break
+        default:
+            return false
+        }
+        if path == "/contentarea/contentarea.aspx", value("LocationType") != "1" { return false }
+        let linkedCourse = id("CourseId") ?? (path == "/contentarea/contentarea.aspx" ? id("LocationId") : nil)
+        let course = linkedCourse ?? courseId
+        if let course, let bulletin = id("LightBulletinId") ?? id("BulletinId") {
+            return visitCourse(course, tab: .updates, target: SearchHit(
+                id: "announcement-\(course)-\(bulletin)", kind: .announcement, title: "Announcement", courseId: course,
+                destination: .announcement(courseId: course, bulletinId: bulletin)
+            ))
+        }
+
+        let learningTool = id("LearningToolElementId")
+        let activity = id("CustomActivityId")
+        let element = id("ElementId") ?? learningTool ?? activity
+        let elementType: String? = switch value("ElementType")?.lowercased() {
+        // Website links use numeric element types, while the API models use names.
+        case "4": "folder"
+        case "131072": "learningtoolelement"
+        case "524288": "customactivity"
+        case let type?: type
+        case nil: learningTool != nil ? "learningtoolelement" : (activity != nil ? "customactivity" : nil)
+        }
+        if let course, let folder = id("FolderId") ?? (elementType == "folder" ? element : nil) {
+            let resource = linkedResource(folder, type: "folder", courseId: course, model: model)
+                ?? Resource(elementId: folder, elementType: "Folder", title: "Folder", courseId: course)
+            return visitCourse(course, tab: .materials) { self.folders[course] = FolderPlace(path: [resource]) }
+        }
+        if let element {
+            if let task = model.tasks.first(where: {
+                $0.elementId == element && (course == nil || $0.courseId == course)
+                    && (elementType == nil || $0.elementType?.lowercased() == elementType)
+            }), task.opensAssignment ? ParityGate.assignments : ParityGate.pages {
+                open(task)
+                return true
+            }
+            if let course, let resource = linkedResource(element, type: elementType, courseId: course, model: model),
+               !resource.isFolder, FileAcquirer.canAttempt(resource), model.downloadStates[resource.id] != .websiteOnly {
+                guard visitCourse(course, tab: .materials) else { return false }
+                var hit = SearchHit(resource: resource, courseId: course, context: nil)
+                hit.url = url.absoluteString
+                model.open(hit)
+                return true
+            }
+            return false
+        }
+        guard let linkedCourse, ["/main.aspx", "/course/course.aspx", "/contentarea/contentarea.aspx"].contains(path) else {
+            return false
+        }
+        return visitCourse(linkedCourse, tab: courseTab)
+    }
+
+    private func linkedResource(_ id: Int, type: String?, courseId: Int, model: AppModel) -> Resource? {
+        let prefix = AppModel.folderKeyPrefix(courseId: courseId)
+        let matches = model.resources.lazy.filter { $0.key.hasPrefix(prefix) }.flatMap(\.value).filter {
+            $0.elementId == id && (type == nil || $0.elementType.lowercased() == type)
+        }
+        return matches.first
+    }
+
+    private func visitCourse(_ course: Int, tab: CourseTab, target: SearchHit? = nil, _ change: () -> Void = {}) -> Bool {
+        guard model?.courses.contains(where: { $0.courseId == course }) == true else { return false }
+        visit(.course(course), tab: tab, target: target, change)
+        return true
+    }
+
+    private func visit(_ selection: AppModel.Selection, tab: CourseTab? = nil, target: SearchHit? = nil, _ change: () -> Void) {
+        guard let model else { return }
+        let previous = place(model)
+        var leaving = current ?? HistoryEntry(place: previous, expandedCourses: expandedCourses)
+        leaving.place = previous
+        leaving.place.file = withShownPage(previous.file)
+        leaving.expandedCourses = expandedCourses
+        if previous.screen != selection || previous.tab != tab { leave(previous) }
+        model.selection = selection
+        if case .course(let course) = selection { courseTabs[course] = tab }
+        searchTarget = target
+        searchArrival = nil
+        model.viewerItem = nil
+        model.viewerIsFull = false
+        change()
+        let destination = place(model)
+        guard destination != previous else { return }
+        history.push(leaving)
+        current = HistoryEntry(place: destination, expandedCourses: expandedCourses)
+        settlesUntil = .distantPast
+        resultFileUntil = .distantPast
+    }
+
     private func isResultFile(_ place: Place, after previous: Place) -> Bool {
         guard Date() < resultFileUntil, place.file != nil else { return false }
         var same = place
@@ -628,141 +762,6 @@ struct HistorySwipeShift: ViewModifier {
         content
             .offset(x: shift)
             .transaction { $0.animation = nil }
-    }
-}
-
-/// The thin icon strip at the window's left edge, shown when the sidebar is hidden. Search,
-/// refresh and the bell stay in the top bar, so they never move between the two layouts.
-struct Rail: View {
-    @Environment(AppModel.self) private var model
-    @Environment(Updater.self) private var updater
-    @Environment(Navigation.self) private var navigation
-
-    var body: some View {
-        VStack(spacing: Space.s4) {
-            RailButton(symbol: Symbol.home, label: "Home", identifier: "rail.home", isSelected: model.selection == .home || model.selection == nil) {
-                model.selection = .home
-            }
-            RailButton(symbol: Symbol.task, label: "Assignments", identifier: "rail.upcoming", isSelected: model.selection == .upcoming) {
-                model.selection = .upcoming
-            }
-            if ParityGate.personalCalendar {
-                RailButton(symbol: Symbol.plan, label: "Calendar", identifier: "rail.calendar", isSelected: model.selection == .calendar) {
-                    model.selection = .calendar
-                }
-            }
-            if ParityGate.messages {
-                RailButton(symbol: Symbol.message, label: "Messages", identifier: "rail.messages", isSelected: model.selection == .messages) {
-                    model.selection = .messages
-                }
-            }
-            // One monogram per course, in its own colour, so courses stay reachable with the sidebar hidden.
-            if !model.courses.isEmpty {
-                Rectangle()
-                    .fill(Color.borderStrong)
-                    .frame(width: Size.icon, height: 1)
-                    .padding(.vertical, Space.s4)
-                    .accessibilityHidden(true)
-            }
-            ScrollView {
-                VStack(spacing: Space.s2) {
-                    ForEach(model.activeCourses) { course in
-                        RailCourseDot(course: course, isSelected: model.selection == .course(course.courseId))
-                    }
-                }
-                // A scroll view puts narrower content at its leading edge; full width centres
-                // the tiles on the rail's line, under the window buttons.
-                .frame(maxWidth: .infinity)
-            }
-            .scrollIndicators(.hidden)
-            // The course list takes what room is left and scrolls when it does not fit.
-            .scrollBounceBehavior(.basedOnSize)
-            if updater.isVisible {
-                UpdateRailButton()
-            }
-            if !model.archivedCourses.isEmpty {
-                RailButton(symbol: Symbol.archive, label: "Archived courses", identifier: "rail.archive", isSelected: navigation.isArchiveOpen) {
-                    navigation.isArchiveOpen.toggle()
-                }
-                .popover(isPresented: Bindable(navigation).isArchiveOpen, arrowEdge: .trailing) {
-                    ArchiveList()
-                        .environment(navigation)
-                }
-            }
-        }
-        .padding(.bottom, Space.s8)
-        // The first icon centres 22pt below the rail's top edge, on the file reader's 44pt tab
-        // row (16pt half-height button plus 6pt), so the two read as one line.
-        .padding(.top, Space.s6)
-        .frame(width: Size.rail)
-        .frame(maxHeight: .infinity)
-        .background(Color.rail)
-    }
-}
-
-private struct RailButton: View {
-    let symbol: String
-    let label: String
-    let identifier: String
-    let isSelected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        IconButton(symbol, label: label, action: action)
-            .frame(width: Size.railTile, height: Size.railTile)
-            .background(RoundedRectangle(cornerRadius: Radius.m, style: .continuous).fill(isSelected ? Color.sidebarSelected : Color.clear))
-            .accessibilityAddTraits(isSelected ? .isSelected : [])
-            .accessibilityIdentifier(identifier)
-    }
-}
-
-/// A course in the compact rail: a two-letter monogram in a circle tinted with the course's colour
-/// ("Bi", "Ma", "PE"). The chosen course gets the same neutral tile as the rail's nav icons, and a
-/// stronger tint in its circle. The full title is the tooltip and the accessibility label. The
-/// tile is `Size.railTile` wide, centred in the rail, so its centre line is the window buttons'
-/// (and every other rail icon's).
-private struct RailCourseDot: View {
-    @Environment(AppModel.self) private var model
-    let course: Course
-    let isSelected: Bool
-    @State private var isHovering = false
-
-    /// The first word's first two characters, the first in capitals ("Biology B" is "Bi", "7A" is
-    /// "7A"). The tooltip has the full name.
-    static func monogram(_ name: String) -> String {
-        guard let word = name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).first else { return "" }
-        let letters = word.prefix(2)
-        return String(letters.prefix(1).uppercased() + letters.dropFirst())
-    }
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Radius.m, style: .continuous)
-        let colour = Color.course(course.courseId)
-        Button { model.selection = .course(course.courseId) } label: {
-            Text(Self.monogram(course.shortTitle))
-                .font(Type.rail)
-                .foregroundStyle(colour)
-                .lineLimit(1)
-                .frame(width: Size.monogram, height: Size.monogram)
-                .background(Circle().fill(colour.opacity(isSelected ? 0.34 : 0.16)))
-                .accessibilityHidden(true)
-                .frame(width: Size.railTile, height: Size.railTile)
-                .background(shape.fill(isSelected ? Color.sidebarSelected : isHovering ? Color.sidebarHover : Color.clear))
-                .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
-        .onHover { hovering in
-            if hovering {
-                isHovering = true
-            } else {
-                hoverEnded { isHovering = false }
-            }
-        }
-        .help(course.displayTitle)
-        .accessibilityLabel(course.displayTitle)
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-        .accessibilityIdentifier("rail.course.\(course.courseId)")
     }
 }
 
