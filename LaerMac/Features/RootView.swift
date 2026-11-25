@@ -6,6 +6,7 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        @Bindable var model = model
         Group {
             switch model.authState {
             case .choosingSite:
@@ -19,6 +20,7 @@ struct RootView: View {
                     .onAppear { Perf.mark("main view mounted") }
             }
         }
+        .confirmsLocalDataRemoval(isPresented: $model.confirmsRemovingLocalData, model: model)
         .tint(Color.accent)
         .appliesAppearance()
         #if DEBUG
@@ -151,7 +153,14 @@ struct SitePickerView: View {
             // A list that failed to load is tried again as the person keeps typing.
             Task { await model.loadSiteList() }
         }
-        .onChange(of: model.siteList) { highlighted = 0 }
+        .onChange(of: model.siteList) { oldSites, _ in
+            guard didMoveHighlight else { return }
+            let previous = SiteDirectory.search(lookup, in: oldSites)
+            if previous.indices.contains(highlighted),
+               let index = matches.firstIndex(where: { $0.customerId == previous[highlighted].customerId }) {
+                highlighted = index
+            }
+        }
     }
 
     private var suggestions: some View {
@@ -217,24 +226,49 @@ private struct SignInView: View {
                     .foregroundStyle(Color.text)
                     .lineLimit(1)
                 Spacer(minLength: Space.s8)
+                if model.usesWebsiteSignIn, let host = model.webSession?.currentHost {
+                    Label(host, systemImage: "lock.fill")
+                        .font(Type.t12)
+                        .foregroundStyle(Color.textMuted)
+                        .accessibilityLabel("Secure website, \(host)")
+                }
+                if model.usesWebsiteSignIn {
+                    TextButton("Sign in with your browser") { model.beginSignIn() }
+                }
                 TextButton("Change institution") { Task { await model.changeInstitution() } }
             }
             .padding(.horizontal, Space.s12)
             .padding(.vertical, Space.s6)
             .background(Color.chrome)
             .overlay(alignment: .bottom) { Rectangle().fill(Color.border).frame(height: 1) }
-            if model.signInLoadFailed {
+            if model.usesWebsiteSignIn {
+                if model.signInLoadFailed {
+                    VStack(spacing: Space.s12) {
+                        ErrorLine("The sign-in page couldn’t load. Check your connection.")
+                        TextButton("Try again") { model.retrySignInPage() }
+                    }
+                    .welcomeCard()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.chrome)
+                } else if let session = model.webSession {
+                    WebSessionView(webView: session.webView)
+                        .id(ObjectIdentifier(session))
+                } else {
+                    Spinner().frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else {
                 VStack(spacing: Space.s12) {
-                    ErrorLine("The sign-in page couldn’t load. Check your connection.")
-                    TextButton("Try again") { model.retrySignInPage() }
+                    if let status = model.signInStatus { ErrorLine(status) }
+                    Button("Sign in with your browser") { model.beginSignIn() }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(model.isSigningIn)
+                    if model.isSigningIn { Spinner() }
+                    TextButton("Use website session instead") { model.beginWebsiteSignIn() }
                 }
                 .welcomeCard()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.chrome)
-            } else if let session = model.webSession {
-                WebSessionView(webView: session.webView)
-            } else {
-                Spinner().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }

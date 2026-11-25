@@ -40,6 +40,7 @@ public actor RefreshCoordinator {
     private let sleep: @Sendable (Duration) async throws -> Void
     private var flights: [Key: Flight] = [:]
     private var minimumGeneration = Int.min
+    private var latestGeneration = 0
     public private(set) var isPaused = false
 
     public init(
@@ -54,20 +55,30 @@ public actor RefreshCoordinator {
     public func run<T: Sendable>(
         key: String, generation: Int, _ work: @escaping @Sendable () async throws -> T
     ) async throws -> T {
-        if isPaused { throw RefreshError.paused }
         if generation < minimumGeneration { throw RefreshError.staleGeneration }
+        latestGeneration = max(latestGeneration, generation)
+        if isPaused { throw RefreshError.paused }
+        try Task.checkCancellation()
         let flightKey = Key(key: key, generation: generation, type: ObjectIdentifier(T.self))
         let waiterID = UUID()
 
-        let value = try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                join(flightKey, waiterID: waiterID, continuation: continuation, work: work)
+        let result: Result<any Sendable, any Error>
+        do {
+            let value = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    join(flightKey, waiterID: waiterID, continuation: continuation, work: work)
+                }
+            } onCancel: {
+                Task { await self.cancelWaiter(flightKey, waiterID: waiterID) }
             }
-        } onCancel: {
-            Task { await self.cancelWaiter(flightKey, waiterID: waiterID) }
+            result = .success(value)
+        } catch {
+            result = .failure(error)
         }
 
         if generation < minimumGeneration { throw RefreshError.staleGeneration }
+        try Task.checkCancellation()
+        let value = try result.get()
         guard let result = value as? T else { throw RefreshError.staleGeneration }
         return result
     }
@@ -76,6 +87,7 @@ public actor RefreshCoordinator {
     public func invalidate(generation: Int) {
         guard generation > minimumGeneration else { return }
         minimumGeneration = generation
+        latestGeneration = max(latestGeneration, generation)
         for (key, flight) in flights where key.generation < generation {
             flights[key] = nil
             flight.task.cancel()
@@ -83,6 +95,14 @@ public actor RefreshCoordinator {
                 continuation.resume(throwing: RefreshError.staleGeneration)
             }
         }
+    }
+
+    /// Cancels all shared reads and returns the generation to use for the next account.
+    @discardableResult
+    public func invalidateAll() -> Int {
+        invalidate(generation: latestGeneration + 1)
+        isPaused = false
+        return latestGeneration
     }
 
     public func resume() {
@@ -144,10 +164,12 @@ public actor RefreshCoordinator {
         var transientRetries = 0
         var throttledOnce = false
         while true {
+            try Task.checkCancellation()
             if isPaused { throw RefreshError.paused }
             do {
                 return try await work()
             } catch let error as APIError {
+                try Task.checkCancellation()
                 switch error {
                 case .server, .offline:
                     guard transientRetries < policy.maxTransientRetries else { throw error }
@@ -172,50 +194,99 @@ public actor RefreshCoordinator {
 
 /// Renews an expired session once for all concurrent callers, then replays each call once.
 public actor SessionRecovery {
-    private let renew: @Sendable () async throws -> Void
+    private let renew: @Sendable (SessionRecovery) async throws -> Void
     private var renewal: Task<Void, any Error>?
     private var epoch = 0
+    private var isInvalidated = false
 
     public init(renew: @escaping @Sendable () async throws -> Void) {
-        self.renew = renew
+        self.renew = { _ in try await renew() }
+    }
+
+    /// Fetches refreshed credentials, then persists them on this actor after verifying the session.
+    /// The synchronous persistence closure runs in the same actor turn as the validity check.
+    public init<Token: Sendable>(
+        refresh: @escaping @Sendable () async throws -> Token,
+        persist: @escaping @Sendable (Token) throws -> Void,
+        install: @escaping @Sendable (Token) async -> Void = { _ in }
+    ) {
+        renew = { recovery in
+            let token = try await refresh()
+            try await recovery.persistIfCurrent(token, using: persist)
+            await install(token)
+        }
+    }
+
+    /// Permanently invalidates this session. Use a new instance for the next session.
+    public func invalidateAll() {
+        isInvalidated = true
+        renewal?.cancel()
+        renewal = nil
     }
 
     public func withRecovery<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) async throws -> T {
+        try checkCurrent()
         let startEpoch = epoch
         do {
-            return try await work()
-        } catch APIError.signedOut {
-            try await renewOnce(after: startEpoch)
-            return try await work()
+            let result: T
+            do {
+                result = try await work()
+            } catch APIError.signedOut {
+                try await renewOnce(after: startEpoch)
+                result = try await work()
+            }
+            try checkCurrent()
+            return result
+        } catch {
+            try checkCurrent()
+            throw error
         }
     }
 
     /// Renews ahead of a request, sparing the failed round trip when expiry is already known.
     public func renewIfNeeded(_ isExpired: @Sendable () async -> Bool) async throws {
+        try checkCurrent()
         let startEpoch = epoch
-        if await isExpired() { try await renewOnce(after: startEpoch) }
+        let expired = await isExpired()
+        try checkCurrent()
+        if expired { try await renewOnce(after: startEpoch) }
+    }
+
+    private func checkCurrent() throws {
+        if isInvalidated { throw RefreshError.staleGeneration }
+        try Task.checkCancellation()
+    }
+
+    private func persistIfCurrent<Token: Sendable>(_ token: Token, using persist: @Sendable (Token) throws -> Void) throws {
+        try checkCurrent()
+        try persist(token)
     }
 
     private func renewOnce(after startEpoch: Int) async throws {
+        try checkCurrent()
         // A renewal that completed after this call started already covers it.
         if epoch > startEpoch { return }
         let task: Task<Void, any Error>
         if let renewal {
             task = renewal
         } else {
-            let renew = self.renew
-            task = Task { try await renew() }
+            task = Task {
+                try self.checkCurrent()
+                try await self.renew(self)
+            }
             renewal = task
         }
         do {
             try await task.value
         } catch {
             if renewal == task { renewal = nil }
+            try checkCurrent()
             throw error
         }
         if renewal == task {
             renewal = nil
             epoch += 1
         }
+        try checkCurrent()
     }
 }

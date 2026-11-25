@@ -57,9 +57,9 @@ final class SameOriginRedirects: NSObject, URLSessionTaskDelegate, Sendable {
         willPerformHTTPRedirection response: HTTPURLResponse,
         newRequest request: URLRequest
     ) async -> URLRequest? {
-        let source = task.originalRequest?.url
-        let sameOrigin = source?.host() == request.url?.host() && request.url?.scheme == "https"
-        return sameOrigin ? request : nil
+        guard let source = task.originalRequest?.url, let target = request.url,
+              SameOriginPortRedirects.isSameOrigin(source, target) else { return nil }
+        return request
     }
 }
 

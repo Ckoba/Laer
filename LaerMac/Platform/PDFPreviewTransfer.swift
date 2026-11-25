@@ -2,7 +2,15 @@ import Foundation
 import LaerCore
 
 /// Writes the original file as it arrives and extracts a provisional page from supported PDFs.
-final class PDFPreviewTransfer: NSObject, URLSessionDataDelegate {
+/// Memory stays bounded: the network task pauses while too many bytes wait to be written, and a
+/// transfer that still outruns the buffer fails rather than silently losing bytes.
+final class PDFPreviewTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    /// Bytes waiting for the file write before the network task pauses, and when it resumes.
+    private static let pauseAbove = 8 * 1024 * 1024
+    private static let resumeBelow = 2 * 1024 * 1024
+    /// Far more chunks than can arrive between a pause request and the task actually pausing.
+    static let bufferedEvents = 4096
+
     private enum Event: Sendable {
         case response(HTTPURLResponse?)
         case bytes(Data)
@@ -16,6 +24,9 @@ final class PDFPreviewTransfer: NSObject, URLSessionDataDelegate {
 
     private let output: AsyncThrowingStream<Event, Error>.Continuation
     private let redirect: @Sendable (URLRequest) -> URLRequest?
+    private let lock = NSLock()
+    private var pendingBytes = 0
+    private var paused = false
 
     private init(output: AsyncThrowingStream<Event, Error>.Continuation, redirect: @escaping @Sendable (URLRequest) -> URLRequest?) {
         self.output = output
@@ -34,7 +45,28 @@ final class PDFPreviewTransfer: NSObject, URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        output.yield(.bytes(data))
+        let shouldPause: Bool = lock.withLock {
+            pendingBytes += data.count
+            guard !paused, pendingBytes > Self.pauseAbove else { return false }
+            paused = true
+            return true
+        }
+        if shouldPause { dataTask.suspend() }
+        if case .dropped = output.yield(.bytes(data)) {
+            dataTask.cancel()
+            output.finish(throwing: URLError(.dataLengthExceedsMaximum))
+        }
+    }
+
+    /// The reader wrote a chunk to disk; resumes the network task once the backlog is small again.
+    private func consumed(_ count: Int, task: URLSessionDataTask) {
+        let shouldResume: Bool = lock.withLock {
+            pendingBytes -= count
+            guard paused, pendingBytes < Self.resumeBelow else { return false }
+            paused = false
+            return true
+        }
+        if shouldResume { task.resume() }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -45,7 +77,8 @@ final class PDFPreviewTransfer: NSObject, URLSessionDataDelegate {
                       redirect: @escaping @Sendable (URLRequest) -> URLRequest?,
                       onPage: @MainActor @Sendable (Data) -> Void) async throws -> FileAcquirer.Staged? {
         try Task.checkCancellation()
-        let (events, output) = AsyncThrowingStream<Event, Error>.makeStream()
+        let (events, output) = AsyncThrowingStream<Event, Error>.makeStream(
+            bufferingPolicy: .bufferingOldest(bufferedEvents))
         let receiver = PDFPreviewTransfer(output: output, redirect: redirect)
         // The linearization offsets describe the original bytes, and HTTP supplies the encoded length.
         var request = request
@@ -74,6 +107,7 @@ final class PDFPreviewTransfer: NSObject, URLSessionDataDelegate {
                     if http.expectedContentLength >= 2_000_000 { preview = .header }
                 case .bytes(let bytes):
                     try file.write(contentsOf: bytes)
+                    receiver.consumed(bytes.count, task: task)
                     let limit: Int
                     switch preview {
                     case .header: limit = 4096

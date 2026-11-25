@@ -1,6 +1,6 @@
 import SwiftUI
 
-// One primitive per control. Rules: docs/ui-reference.md.
+// One primitive per control.
 
 // MARK: - Spinner
 
@@ -689,7 +689,7 @@ struct RowTrailing: View {
     }
 
     /// How far a 12pt line's baseline sits below its centre.
-    static let baselineBelowCenter: CGFloat = 4.5
+    nonisolated static let baselineBelowCenter: CGFloat = 4.5
 }
 
 /// The trailing mark of a row that opens on the website, where other rows have the chevron.

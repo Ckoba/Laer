@@ -2,6 +2,46 @@ import AppKit
 import LaerCore
 import SwiftUI
 
+/// Sendable text and previews prepared before handing the blocks to AppKit.
+struct ParsedRichText: Sendable {
+    let blocks: [RichBlock]
+    let preview: String
+
+    init(html: String) {
+        blocks = RichText.blocks(fromHTML: html)
+        preview = RichText.preview(blocks)
+    }
+
+    func inlinePreview() -> AttributedString {
+        var result = AttributedString()
+        for block in blocks {
+            let runs: [RichRun]
+            switch block {
+            case .heading(_, let r), .paragraph(let r), .quote(let r): runs = r
+            case .listItem(let ordered, let number, _, let r): runs = [RichRun(text: ordered ? "\(number). " : "\u{2022} ")] + r
+            case .table(let rows): runs = rows.flatMap { $0.flatMap { $0.runs + [RichRun(text: " ")] } }
+            case .code(let text): runs = [RichRun(text: text)]
+            case .image(_, let alt): runs = alt.map { [RichRun(text: $0)] } ?? []
+            case .embed, .rule: runs = []
+            }
+            guard !runs.isEmpty else { continue }
+            if !result.characters.isEmpty { result += AttributedString("\n") }
+            for run in runs {
+                var part = AttributedString(run.text)
+                var intent: InlinePresentationIntent = []
+                if run.bold { intent.insert(.stronglyEmphasized) }
+                if run.italic { intent.insert(.emphasized) }
+                if run.code { intent.insert(.code) }
+                if !intent.isEmpty { part.inlinePresentationIntent = intent }
+                if run.underline { part.underlineStyle = .single }
+                if run.strikethrough { part.strikethroughStyle = .single }
+                result += part
+            }
+        }
+        return result
+    }
+}
+
 /// The surface course text sits on, which decides its colours.
 enum RichTextTone: Hashable {
     /// The page or a neutral card.

@@ -172,6 +172,41 @@ private func waitUntil(_ condition: @Sendable () async -> Bool) async {
         #expect(await log.durations.isEmpty)
     }
 
+    @Test func invalidateAllDetachesEveryWaiterAndRejectsTheOldGeneration() async throws {
+        let coordinator = makeCoordinator(SleepLog())
+        let started = Gate()
+        let finished = Gate()
+        let release = Gate()
+        let old = Task {
+            try await coordinator.run(key: "courses", generation: 7) {
+                await started.open()
+                await release.wait()
+                await finished.open()
+                return 1
+            }
+        }
+        await started.wait()
+        let joined = Task {
+            try await coordinator.run(key: "courses", generation: 7) {
+                Issue.record("A matching read should join the existing flight")
+                return 2
+            }
+        }
+        await waitUntil { await coordinator.waiterCount(key: "courses", generation: 7, type: Int.self) == 2 }
+
+        let generation = await coordinator.invalidateAll()
+        #expect(generation == 8)
+        await #expect(throws: RefreshError.staleGeneration) { try await old.value }
+        await #expect(throws: RefreshError.staleGeneration) { try await joined.value }
+        await #expect(throws: RefreshError.staleGeneration) {
+            try await coordinator.run(key: "courses", generation: 7) { 3 }
+        }
+        #expect(try await coordinator.run(key: "courses", generation: generation) { 4 } == 4)
+
+        await release.open()
+        await finished.wait()
+    }
+
     @Test func invalidatedGenerationIsStale() async throws {
         let coordinator = makeCoordinator(SleepLog())
         let gate = Gate()
@@ -259,6 +294,42 @@ private func waitUntil(_ condition: @Sendable () async -> Bool) async {
         var count: Int { lock.withLock { value } }
     }
 
+    @Test func invalidateAllPreventsAnInFlightRenewalFromPersistingOrReplaying() async throws {
+        let started = Gate()
+        let release = Gate()
+        let persisted = Counter()
+        let attempts = Counter()
+        let recovery = SessionRecovery(
+            refresh: {
+                await started.open()
+                await release.wait()
+                return "fixture-token"
+            },
+            persist: { _ in persisted.increment() }
+        )
+        let waiting = Task {
+            try await recovery.withRecovery { () async throws -> Int in
+                attempts.increment()
+                throw APIError.signedOut
+            }
+        }
+        await started.wait()
+        await recovery.invalidateAll()
+        await release.open()
+
+        await #expect(throws: RefreshError.staleGeneration) { try await waiting.value }
+        await #expect(throws: RefreshError.staleGeneration) { try await recovery.renewIfNeeded { true } }
+        #expect(persisted.count == 0)
+        #expect(attempts.count == 1)
+    }
+
+    @Test func currentRenewalPersistsBeforeReturning() async throws {
+        let persisted = Counter()
+        let recovery = SessionRecovery(refresh: { "fixture-token" }, persist: { _ in persisted.increment() })
+        try await recovery.renewIfNeeded { true }
+        #expect(persisted.count == 1)
+    }
+
     @Test func renewsOnceForConcurrentCallersWhenExpired() async throws {
         let counter = Counter()
         let recovery = SessionRecovery {
@@ -276,5 +347,55 @@ private func waitUntil(_ condition: @Sendable () async -> Bool) async {
         let recovery = SessionRecovery { counter.increment() }
         try await recovery.renewIfNeeded { false }
         #expect(counter.count == 0)
+    }
+}
+
+@Suite struct BoundedCalendarAndMultipartTests {
+    @Test func calendarStopsAfterPassingTheUpperBound() async throws {
+        let formatter = ISO8601DateFormatter()
+        let from = try #require(formatter.date(from: "2026-05-04T00:00:00Z"))
+        let end = try #require(formatter.date(from: "2026-05-11T00:00:00Z"))
+        let client = ItslearningClient(transport: FixtureTransport { request in
+            let index = request.query.first { $0.name == "PageIndex" }?.value
+            switch index {
+            case "0":
+                return .json(#"{"EntityArray":[{"EventId":1,"FromDate":"2026-05-05T10:00:00Z"}],"Total":50,"CurrentPageIndex":0,"PageSize":1}"#)
+            case "1":
+                return .json(#"{"EntityArray":[{"EventId":2,"FromDate":"2026-05-11T00:00:00Z"}],"Total":50,"CurrentPageIndex":1,"PageSize":1}"#)
+            case "2":
+                return .json(#"{"EntityArray":[{"EventId":3,"FromDate":"2026-05-12T10:00:00Z"}],"Total":50,"CurrentPageIndex":2,"PageSize":1}"#)
+            default:
+                Issue.record("Calendar fetched another page after passing the end date")
+                return .json("{}", status: 500)
+            }
+        })
+
+        let result = try await client.calendarEvents(from: from, toDate: end)
+        #expect(result.items.map(\.eventId) == [1, 2])
+        #expect(result.isComplete)
+    }
+
+    @Test func multipartPreservesBinaryAndWritesExactBoundaries() throws {
+        let binary = Data([0x00, 0xff, 0x0d, 0x0a, 0x80])
+        let request = WriteRequest(
+            method: .post, path: "/fixture",
+            body: .multipart([
+                UploadPart(fileName: "résumé.bin", contentType: "application/octet-stream", data: binary),
+                UploadPart(fieldName: "notes", fileName: "a\"b.txt", contentType: "text/plain", data: Data("a=b".utf8)),
+            ]),
+            routeTemplate: "fixture"
+        )
+
+        let encoded = try #require(request.encodedBody(boundary: "fixture"))
+        let expected = Data(("--fixture\r\n"
+            + "Content-Disposition: form-data; name=\"file\"; filename=\"résumé.bin\"\r\n"
+            + "Content-Type: application/octet-stream\r\n\r\n").utf8)
+            + binary
+            + Data(("\r\n--fixture\r\n"
+                + "Content-Disposition: form-data; name=\"notes\"; filename=\"a'b.txt\"\r\n"
+                + "Content-Type: text/plain\r\n\r\n"
+                + "a=b\r\n--fixture--\r\n").utf8)
+        #expect(encoded.contentType == "multipart/form-data; boundary=fixture")
+        #expect(encoded.data == expected)
     }
 }

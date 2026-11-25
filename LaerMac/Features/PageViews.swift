@@ -79,12 +79,29 @@ struct PageReaderView: View {
                 ForEach(blocks) { block in
                     ContentBlockView(block: block)
                 }
+            } else if isWebsiteOnlyFallback, let url = model.absoluteURL(resource.url) {
+                VStack(alignment: .leading, spacing: Space.s8) {
+                    EmptyLine("This item opens on the website.")
+                    TextButton("Open on the website", role: .primary) { NSWorkspace.shared.open(url) }
+                }
+                .padding(.vertical, Space.s8)
             } else {
                 EmptyState(state: loader.state, empty: "This page is empty")
             }
         }
         .task { await loader.load(using: model) }
         .focusedSceneValue(\.refreshCurrent, RefreshAction { await loader.refresh(using: model) })
+    }
+
+    /// Non-page tasks (such as CustomActivity reading items) often return 403, 404 or 500 on `pages/{id}/v1`.
+    private var isWebsiteOnlyFallback: Bool {
+        guard let error = loader.lastError else { return false }
+        switch error {
+        case APIError.forbidden, APIError.notFound, APIError.server:
+            return true
+        default:
+            return false
+        }
     }
 }
 

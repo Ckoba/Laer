@@ -11,6 +11,25 @@ final class LaerScreenshotUITests: XCTestCase {
     func testScreensLight() { walk(appearance: "Light") }
     func testScreensDark() { walk(appearance: "Dark") }
 
+    func testReadmeShowcase() {
+        for (appearance, name) in [("Light", "screenshot-light"), ("Dark", "screenshot-dark")] {
+            let app = XCUIApplication()
+            app.launchArguments += [
+                "-ApplePersistenceIgnoreState", "YES", "-LaerUITestReset", "YES",
+                "-LaerFixtureMode", "YES", "-LaerFixtureShowcase", "YES",
+                "-LaerUITestAppearance", appearance,
+                "-viewerPagesLocked", "NO",
+                "-LaerUITestWindowSize", "1200x780",
+            ]
+            app.launch()
+            let any = app.descendants(matching: .any)
+            XCTAssertTrue(any["sidebar.course.21"].waitForExistence(timeout: 15), "Showcase course did not show")
+            settle(2)
+            shot(app, name)
+            app.terminate()
+        }
+    }
+
     private func walk(appearance: String) {
         let app = XCUIApplication()
         app.launchArguments += [

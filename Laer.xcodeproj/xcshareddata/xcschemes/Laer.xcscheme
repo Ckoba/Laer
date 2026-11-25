@@ -61,17 +61,6 @@
                ReferencedContainer = "container:Laer.xcodeproj">
             </BuildableReference>
          </TestableReference>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "LaerCoreTests"
-               BuildableName = "LaerCoreTests"
-               BlueprintName = "LaerCoreTests"
-               ReferencedContainer = "container:Packages/LaerCore">
-            </BuildableReference>
-         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>

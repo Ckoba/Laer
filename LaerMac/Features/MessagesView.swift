@@ -5,16 +5,16 @@ import SwiftUI
 struct MessagesView: View {
     @Environment(AppModel.self) private var model
     @Environment(Navigation.self) private var navigation
-    @State private var loader = CollectionLoader<MessageThread>(key: "message-threads", coverage: .recentWindow) { client in
-        let list = try await client.messageThreads()
-        return PagedResult(items: list.threads, isComplete: true)
-    }
+    @State private var loader = ConversationLoader()
+    private var session: CollectionSession { CollectionSession(model) }
+    private var records: [MessageThread] { loader.session == session ? loader.records : [] }
     /// In `Navigation`, so each conversation opened is a history entry.
     private var selectedThread: Int? {
         get { navigation.selectedThread }
         nonmutating set { navigation.selectedThread = newValue }
     }
     @State private var searchThread: MessageThread?
+    @State private var searchSession: CollectionSession?
     @State private var composingNew = false
 
     var body: some View {
@@ -29,15 +29,15 @@ struct MessagesView: View {
                         await loader.refresh(using: model)
                         selectedThread = threadId
                     }
-                } else if let thread = loader.records.first(where: { $0.threadId == selectedThread })
-                            ?? searchThread.flatMap({ $0.threadId == selectedThread ? $0 : nil }) {
+                } else if let thread = records.first(where: { $0.threadId == selectedThread })
+                            ?? (searchSession == session ? searchThread.flatMap { $0.threadId == selectedThread ? $0 : nil } : nil) {
                     ThreadView(thread: thread, me: myId) { await loader.refresh(using: model) }
                         .id(thread.threadId)
                 } else {
                     // Centred in the pane, like Mail with no message selected.
                     Group {
                         if selectedThread != nil { EmptyLine("This conversation is unavailable") }
-                        else { EmptyLine(loader.records.isEmpty ? "" : "Choose a conversation") }
+                        else { EmptyLine(records.isEmpty ? "" : "Choose a conversation") }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color.stage)
@@ -46,16 +46,22 @@ struct MessagesView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .navigationTitle("Messages")
-        .task { await loader.load(using: model) }
-        .task(id: navigation.searchTarget?.id) {
+        .task(id: session) { await loader.load(using: model) }
+        .task(id: SearchRequest(target: navigation.searchTarget?.id, session: session)) {
             guard case .thread(let id) = navigation.searchTarget?.destination else { return }
-            let store = model.snapshots
-            let saved = await store?.load(MessageThread.self, collection: "search-recent-threads")?.records
-            guard !Task.isCancelled, store === model.snapshots else { return }
+            let session = session
+            let saved = await session.store?.load(MessageThread.self, collection: "search-recent-threads")?.records
+            guard session.isCurrent(model), case .thread(id) = navigation.searchTarget?.destination else { return }
             composingNew = false
+            searchSession = session
             searchThread = saved?.first { $0.threadId == id }
         }
         .focusedSceneValue(\.refreshCurrent, RefreshAction { await loader.refresh(using: model) })
+    }
+
+    private struct SearchRequest: Equatable {
+        var target: String?
+        var session: CollectionSession
     }
 
     private var myId: Int? {
@@ -83,13 +89,13 @@ struct MessagesView: View {
             .padding(.trailing, Space.s6)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    FreshnessLine(state: loader.state)
+                    FreshnessLine(state: loader.session == session ? loader.state : CollectionState())
                         .padding(.horizontal, Space.s8)
-                    if loader.records.isEmpty {
-                        EmptyState(state: loader.state, empty: "No messages")
+                    if records.isEmpty {
+                        EmptyState(state: loader.session == session ? loader.state : CollectionState(), empty: "No messages")
                             .padding(.horizontal, Space.s8)
                     }
-                    ForEach(loader.records) { thread in
+                    ForEach(records) { thread in
                         RowButton(selected: thread.threadId == selectedThread, action: {
                             composingNew = false
                             selectedThread = thread.threadId
@@ -99,18 +105,152 @@ struct MessagesView: View {
                         }
                         .overlay(alignment: .bottom) {
                             // A hairline between rows only, from the text's leading edge.
-                            if thread.id != loader.records.last?.id {
+                            if thread.id != records.last?.id {
                                 Rectangle().fill(Color.border).frame(height: 1)
                                     .padding(.leading, Space.s8 + ThreadHeader.gutter + ThreadHeader.dotGap + 28 + Space.s6)
                                     .padding(.trailing, Space.s8)
                             }
                         }
                     }
+                    if loader.session == session { pagination }
                 }
                 .padding(.horizontal, Space.s4)
             }
         }
         .background(Color.stage)
+    }
+    @ViewBuilder private var pagination: some View {
+        if loader.isLoadingMore || loader.pageError != nil || loader.cursor != nil {
+            VStack(alignment: .leading, spacing: Space.s4) {
+                if let error = loader.pageError { ErrorLine(error) }
+                if loader.isLoadingMore {
+                    Spinner()
+                } else if loader.cursor != nil {
+                    TextButton(loader.pageError == nil ? "Load more conversations" : "Retry loading conversations") {
+                        Task { await loader.loadMore(using: model) }
+                    }
+                    .disabled(loader.state.phase == .loading)
+                } else {
+                    TextButton("Reload conversations") { Task { await loader.refresh(using: model) } }
+                        .disabled(loader.state.phase == .loading)
+                }
+            }
+            .padding(Space.s8)
+        }
+    }
+}
+
+/// The sidebar keeps its own checkpoint, since Home also caches a preview of the first page.
+@MainActor
+@Observable
+final class ConversationLoader {
+    private static let collection = "message-conversations"
+    private(set) var session: CollectionSession?
+    private(set) var records: [MessageThread] = []
+    private(set) var state = CollectionState()
+    private(set) var cursor: Int64?
+    private(set) var pageError: String?
+    private(set) var isLoadingMore = false
+    private var requestID: UUID?
+
+    private func scope(to model: AppModel) -> CollectionSession {
+        let current = CollectionSession(model)
+        if session != current {
+            session = current
+            records = []
+            state = CollectionState()
+            cursor = nil
+            pageError = nil
+            requestID = nil
+            isLoadingMore = false
+        }
+        return current
+    }
+
+    func load(using model: AppModel) async {
+        guard !Task.isCancelled else { return }
+        let session = scope(to: model)
+        if state.lastSuccess == nil, requestID == nil {
+            let cached = await session.store?.load(MessageThread.self, collection: Self.collection)
+            let preview = cached == nil ? await session.store?.load(MessageThread.self, collection: "message-threads") : nil
+            guard session.isCurrent(model), requestID == nil else { return }
+            if let saved = cached ?? preview, state.lastSuccess == nil {
+                records = Self.unique(saved.records)
+                state.lastSuccess = saved.lastSuccess
+                cursor = cached?.checkpoint.flatMap(Int64.init)
+            }
+        }
+        await refresh(using: model)
+    }
+
+    func refresh(using model: AppModel) async {
+        await fetchPage(using: model, append: false)
+    }
+
+    func loadMore(using model: AppModel) async {
+        await fetchPage(using: model, append: true)
+    }
+
+    private func fetchPage(using model: AppModel, append: Bool) async {
+        guard !Task.isCancelled else { return }
+        let session = scope(to: model)
+        if append {
+            guard requestID == nil, cursor != nil else { return }
+        } else {
+            guard state.phase != .loading else { return }
+        }
+
+        let request = UUID()
+        requestID = request
+        let before = append ? cursor : nil
+        isLoadingMore = append
+        if !append { state.phase = .loading }
+        pageError = nil
+        defer {
+            if requestID == request {
+                requestID = nil
+                isLoadingMore = false
+                if state.phase == .loading { state.phase = .idle }
+            }
+        }
+        do {
+            let key = "message-conversations-\(before.map(String.init) ?? "first")"
+            let page = try await model.fetch(key: key) { try await $0.messageThreads(before: before) }
+            guard session.isCurrent(model), requestID == request else { return }
+            let next = page.nextConversationCursor(after: before)
+            let now = Date()
+            if append {
+                records = Self.unique(records + page.threads)
+                cursor = next ?? (page.hasMore ? before : nil)
+            } else if next != nil, let boundary = page.threads.last,
+                      let index = records.firstIndex(where: { $0.threadId == boundary.threadId }),
+                      boundary.sortIndex == records[index].sortIndex, index < records.count - 1 {
+                // The new head overlaps the old one, so the previously loaded tail is still contiguous.
+                records = Self.unique(page.threads + Array(records.dropFirst(index + 1)))
+            } else {
+                records = Self.unique(page.threads)
+                cursor = next
+            }
+            if page.hasMore && next == nil {
+                pageError = String(localized: "Laer couldn’t find the next page of conversations.")
+            }
+            state = CollectionState(phase: .idle, lastSuccess: now)
+            try? await session.store?.save(records, collection: Self.collection, coverage: .recentWindow,
+                                           checkpoint: cursor.map(String.init), at: now)
+        } catch is CancellationError {
+            return
+        } catch RefreshError.staleGeneration {
+            return
+        } catch {
+            guard session.isCurrent(model), requestID == request else { return }
+            let message = model.message(for: error)
+            if append { pageError = message } else { state.phase = .failed(message) }
+        }
+    }
+
+    private static func unique(_ threads: [MessageThread]) -> [MessageThread] {
+        var seen: Set<Int> = []
+        return threads.filter { seen.insert($0.threadId).inserted }
     }
 }
 
@@ -757,35 +897,26 @@ private struct ReplyComposer: View {
         nonmutating set { navigation.replyDrafts[threadId] = newValue.isEmpty ? nil : newValue }
     }
     private var textBinding: Binding<String> { Binding(get: { text }, set: { text = $0 }) }
-    @State private var files: [PickedFile] = []
+    @State private var attachments = AttachmentDraft()
     @State private var action = WriteAction()
-    @State private var pickError: String?
 
-    private var canSend: Bool { !action.isRunning && (!text.isBlank || !files.isEmpty) }
+    private var canSend: Bool { !action.isRunning && !attachments.isLoading && (!text.isBlank || !attachments.files.isEmpty) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.s6) {
-            AttachmentList(files: $files).disabled(action.isRunning)
+            AttachmentList(draft: attachments).disabled(action.isRunning)
             MessageComposerBar(label: "Reply", text: textBinding, canSend: canSend, isSending: action.isRunning,
-                               onAttach: attach, onSend: { Task { await send() } })
+                               isReadingAttachments: attachments.isLoading,
+                               onAttach: { Task { await attachments.pick() } }, onSend: { Task { await send() } })
             if case .failed(let message) = action.phase { ErrorLine(message) }
-            if let pickError { ErrorLine(pickError) }
         }
         .padding(.top, Space.s12)
     }
 
-    private func attach() {
-        pickError = nil
-        do {
-            files += try PickedFile.pick()
-        } catch {
-            pickError = WriteText.failure(error)
-        }
-    }
-
     private func send() async {
+        guard canSend else { return }
         let body = text
-        let parts = files.map(\.part)
+        let parts = attachments.files.map(\.part)
         let threadId = threadId
         let sent = await action.run {
             _ = try await model.write { writer in
@@ -798,7 +929,7 @@ private struct ReplyComposer: View {
         }
         if sent {
             text = ""
-            files = []
+            attachments.clear()
             await onSent()
         }
     }

@@ -15,18 +15,14 @@ struct SessionVault {
         [site.baseURL.host() ?? "", "resource.itslearning.com"]
     }
 
-    func save(from store: WKHTTPCookieStore) async {
+    /// False when the Keychain refused the write; the previously saved cookies stay as they were.
+    @discardableResult
+    func save(from store: WKHTTPCookieStore, isCurrent: () -> Bool = { true }) async -> Bool {
         let cookies = CookieScope.filter(await store.allCookies(), forHosts: hosts)
+        guard isCurrent() else { return false }
         let records = cookies.compactMap(Self.record(from:))
-        guard let data = try? JSONEncoder().encode(records) else { return }
-        let query = baseQuery
-        let attributes: [String: Any] = [kSecValueData as String: data]
-        if SecItemUpdate(query as CFDictionary, attributes as CFDictionary) == errSecItemNotFound {
-            var add = query
-            add[kSecValueData as String] = data
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            SecItemAdd(add as CFDictionary, nil)
-        }
+        guard let data = try? JSONEncoder().encode(records) else { return false }
+        return Keychain.upsert(baseQuery, data: data, operation: "session save")
     }
 
     /// Puts saved cookies back before the first page loads. Returns how many were restored.
@@ -36,7 +32,9 @@ struct SessionVault {
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status != errSecSuccess, status != errSecItemNotFound { Keychain.report("session load", status) }
+        guard status == errSecSuccess,
               let data = item as? Data,
               let records = try? JSONDecoder().decode([Record].self, from: data) else { return 0 }
         let cookies = records.compactMap(Self.cookie(from:))
@@ -46,8 +44,10 @@ struct SessionVault {
         return cookies.count
     }
 
-    func clear() {
-        SecItemDelete(baseQuery as CFDictionary)
+    /// True when no saved cookies remain afterwards, including when there were none.
+    @discardableResult
+    func clear() -> Bool {
+        Keychain.delete(baseQuery, operation: "session clear")
     }
 
     private var baseQuery: [String: Any] {

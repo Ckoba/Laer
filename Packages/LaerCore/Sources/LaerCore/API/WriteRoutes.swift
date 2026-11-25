@@ -62,17 +62,27 @@ public struct WriteRequest: Sendable, Hashable {
         case .json(let data):
             return ("application/json; charset=utf-8", data)
         case .multipart(let parts):
-            var data = Data()
-            for part in parts {
+            let headers = parts.map { part in
                 let name = Self.quoted(part.fieldName)
                 let file = Self.quoted(part.fileName)
-                data.append(Data("--\(boundary)\r\n".utf8))
-                data.append(Data("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(file)\"\r\n".utf8))
-                data.append(Data("Content-Type: \(part.contentType)\r\n\r\n".utf8))
-                data.append(part.data)
-                data.append(Data("\r\n".utf8))
+                return Data(("--\(boundary)\r\n"
+                    + "Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(file)\"\r\n"
+                    + "Content-Type: \(part.contentType)\r\n\r\n").utf8)
             }
-            data.append(Data("--\(boundary)--\r\n".utf8))
+            let lineBreak = Data("\r\n".utf8)
+            let closing = Data("--\(boundary)--\r\n".utf8)
+            let segments = zip(headers, parts)
+            let capacity = segments.reduce(closing.count) { size, segment in
+                size + segment.0.count + segment.1.data.count + lineBreak.count
+            }
+            var data = Data()
+            data.reserveCapacity(capacity)
+            for (header, part) in segments {
+                data.append(header)
+                data.append(part.data)
+                data.append(lineBreak)
+            }
+            data.append(closing)
             return ("multipart/form-data; boundary=\(boundary)", data)
         }
     }

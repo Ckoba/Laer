@@ -16,7 +16,9 @@ struct FreshnessLine: View {
     private var isQuietRefresh: Bool { state.phase == .loading && state.lastSuccess != nil }
 
     /// The normal state takes no space, so nothing sits above a page's first row.
+    /// Before a first successful load, `EmptyState` owns the spinner or error line so it never duplicates.
     private var hasContent: Bool {
+        guard state.lastSuccess != nil else { return false }
         if isQuietRefresh { return false }
         if case .failed(AppModel.signedOutMessage) = state.phase { return false }
         return state.phase != .idle || state.isIncomplete || isStale

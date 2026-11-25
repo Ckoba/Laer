@@ -24,18 +24,30 @@ jobs:
         with:
           persist-credentials: false
 
+      # Swift warnings fail the build, so the Swift 6 concurrency checks stay at zero warnings.
       - name: Build unsigned Release app
         run: |
+          set -o pipefail
           xcodebuild -version
           xcodebuild -project Laer.xcodeproj -scheme Laer -configuration Release \
             -destination 'platform=macOS,arch=arm64' -derivedDataPath "$RUNNER_TEMP/Laer" \
             -onlyUsePackageVersionsFromResolvedFile COMPILER_INDEX_STORE_ENABLE=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             CODE_SIGNING_ALLOWED=NO build | xcbeautify --renderer github-actions
+
+      - name: Test LaerCore with SwiftPM
+        run: |
+          set -o pipefail
+          swift --version
+          swift test --package-path Packages/LaerCore --scratch-path "$RUNNER_TEMP/spm" \
+            -Xswiftc -warnings-as-errors
 
       - name: Run headless tests
         run: |
+          set -o pipefail
           xcodebuild -project Laer.xcodeproj -scheme Laer -configuration Debug \
             -destination 'platform=macOS,arch=arm64' -derivedDataPath "$RUNNER_TEMP/Laer" \
             -onlyUsePackageVersionsFromResolvedFile -skip-testing:LaerMacUITests \
             COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             test | xcbeautify --renderer github-actions

@@ -151,6 +151,9 @@ final class OfficePDFConverter: NSObject, WKNavigationDelegate {
         let ext = source.pathExtension.lowercased()
         let complete = work.appendingPathComponent("Complete", isDirectory: true)
         try FileManager.default.createDirectory(at: complete, withIntermediateDirectories: false)
+        // The helper only reads files inside this scratch folder; on APFS the copy is a clone.
+        let input = work.appendingPathComponent("Document." + ext, isDirectory: false)
+        try FileManager.default.copyItem(at: source, to: input)
         // The system's own picture of the first slide shows while Quick Look writes the whole deck.
         let cover = ViewerItem.slideExtensions.contains(ext) ? Task { [weak self] in
             guard let page = await Self.coverPage(for: source), !Task.isCancelled,
@@ -159,7 +162,7 @@ final class OfficePDFConverter: NSObject, WKNavigationDelegate {
             Perf.mark("office first page rendered")
         } : nil
         defer { cover?.cancel() }
-        let preview = try await Self.quickLookHTML(for: source, in: complete)
+        let preview = try await Self.quickLookHTML(for: input, in: complete)
         return try await render(preview, in: view, isWord: ViewerItem.wordExtensions.contains(ext))
     }
 
@@ -184,22 +187,31 @@ final class OfficePDFConverter: NSObject, WKNavigationDelegate {
     }
 
     /// Asks the helper service to run Quick Look. Its sandbox rules forbid running it from this app.
+    /// Cancelling the task closes the connection, which stops Quick Look in the helper at once,
+    /// and removes the partial output instead of waiting for the helper's own time limit.
     private nonisolated static func quickLookHTML(for source: URL, in directory: URL) async throws -> URL {
         try Task.checkCancellation()
         let connection = makeConnection()
         defer { connection.invalidate() }
-        let succeeded: Bool = await withCheckedContinuation { continuation in
-            let once = OnceFlag()
-            let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
-                if once.claim() { continuation.resume(returning: false) }
-            } as? QuickLookPreviewing
-            guard let proxy else {
-                if once.claim() { continuation.resume(returning: false) }
-                return
+        let closer = ConnectionCloser(connection)
+        let succeeded: Bool = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let once = OnceFlag()
+                let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+                    if once.claim() { continuation.resume(returning: false) }
+                } as? QuickLookPreviewing
+                guard let proxy else {
+                    if once.claim() { continuation.resume(returning: false) }
+                    return
+                }
+                proxy.writePreview(sourcePath: source.path, outputPath: directory.path) { result in
+                    if once.claim() { continuation.resume(returning: result) }
+                }
             }
-            proxy.writePreview(sourcePath: source.path, outputPath: directory.path) { result in
-                if once.claim() { continuation.resume(returning: result) }
-            }
+        } onCancel: {
+            // Invalidation also fires the error handler above, which ends the wait.
+            closer.close()
+            try? FileManager.default.removeItem(at: directory.deletingLastPathComponent())
         }
         let html = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil)?
             .compactMap { $0 as? URL }
@@ -218,6 +230,10 @@ final class OfficePDFConverter: NSObject, WKNavigationDelegate {
     }
 
     private func render(_ html: URL, in view: WKWebView, isWord: Bool) async throws -> [Data] {
+        // Office files can reference remote images and links; none of them may load.
+        guard let rules = await Self.localOnlyRules() else { throw OfficePDFConverterError.previewUnavailable }
+        view.configuration.userContentController.removeAllContentRuleLists()
+        view.configuration.userContentController.add(rules)
         view.navigationDelegate = self
         // A preview that never finishes loading fails the conversion instead of leaving a spinner.
         let timeout = Task { [weak self] in
@@ -253,13 +269,59 @@ final class OfficePDFConverter: NSObject, WKNavigationDelegate {
         return capturedPages
     }
 
+    /// Draws each captured page straight into the output file, so only one parsed page is held at a time.
+    /// Web links on a page are carried over; other annotations do not exist in WebKit captures.
     private nonisolated static func write(_ pages: [Data], to url: URL) -> Bool {
-        let document = PDFDocument()
-        for (index, bytes) in pages.enumerated() {
-            guard let page = PDFDocument(data: bytes)?.page(at: 0) else { return false }
-            document.insert(page, at: index)
+        guard let context = CGContext(url as CFURL, mediaBox: nil, nil) else { return false }
+        var complete = true
+        for bytes in pages {
+            let drawn: Bool = autoreleasepool {
+                guard let provider = CGDataProvider(data: bytes as CFData),
+                      let page = CGPDFDocument(provider)?.page(at: 1) else { return false }
+                var box = page.getBoxRect(.mediaBox)
+                context.beginPage(mediaBox: &box)
+                context.drawPDFPage(page)
+                for (link, rect) in webLinks(on: page) { context.setURL(link as CFURL, for: rect) }
+                context.endPage()
+                return true
+            }
+            guard drawn else {
+                complete = false
+                break
+            }
         }
-        return document.write(to: url)
+        context.closePDF()
+        if !complete { try? FileManager.default.removeItem(at: url) }
+        return complete
+    }
+
+    /// The `http`, `https` and `mailto` link annotations on a page, in page coordinates.
+    private nonisolated static func webLinks(on page: CGPDFPage) -> [(URL, CGRect)] {
+        guard let dictionary = page.dictionary else { return [] }
+        var annotations: CGPDFArrayRef?
+        guard CGPDFDictionaryGetArray(dictionary, "Annots", &annotations), let annotations else { return [] }
+        var links: [(URL, CGRect)] = []
+        for index in 0..<CGPDFArrayGetCount(annotations) {
+            var annotation: CGPDFDictionaryRef?
+            var subtype: UnsafePointer<CChar>?
+            var action: CGPDFDictionaryRef?
+            var uri: CGPDFStringRef?
+            var corners: CGPDFArrayRef?
+            guard CGPDFArrayGetDictionary(annotations, index, &annotation), let annotation,
+                  CGPDFDictionaryGetName(annotation, "Subtype", &subtype), let subtype, String(cString: subtype) == "Link",
+                  CGPDFDictionaryGetDictionary(annotation, "A", &action), let action,
+                  CGPDFDictionaryGetString(action, "URI", &uri), let uri,
+                  let text = CGPDFStringCopyTextString(uri) as String?, let link = URL(string: text),
+                  ["http", "https", "mailto"].contains(link.scheme?.lowercased() ?? ""),
+                  CGPDFDictionaryGetArray(annotation, "Rect", &corners), let corners,
+                  CGPDFArrayGetCount(corners) == 4 else { continue }
+            var values = [CGPDFReal](repeating: 0, count: 4)
+            guard (0..<4).allSatisfy({ CGPDFArrayGetNumber(corners, $0, &values[$0]) }) else { continue }
+            let rect = CGRect(x: min(values[0], values[2]), y: min(values[1], values[3]),
+                              width: abs(values[2] - values[0]), height: abs(values[3] - values[1]))
+            links.append((link, rect))
+        }
+        return links
     }
 
     private static let slidePageBoxes = """
@@ -304,6 +366,33 @@ final class OfficePDFConverter: NSObject, WKNavigationDelegate {
 
     private static let loadTimeout = Duration.seconds(30)
 
+    /// Blocks every load that is not a local file or inline data. Compiled once per launch.
+    private static var localOnlyRuleList: WKContentRuleList?
+    private static let localOnlyRuleSource = """
+        [{"trigger":{"url-filter":".*"},"action":{"type":"block"}},
+         {"trigger":{"url-filter":"^(file|data|about|blob):"},"action":{"type":"ignore-previous-rules"}}]
+        """
+
+    private static func localOnlyRules() async -> WKContentRuleList? {
+        if let localOnlyRuleList { return localOnlyRuleList }
+        let store = WKContentRuleListStore.default()
+        let identifier = "LaerOfficeLocalOnly-1"
+        guard let store else { return nil }
+        let list = await withCheckedContinuation { (continuation: CheckedContinuation<WKContentRuleList?, Never>) in
+            store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: localOnlyRuleSource) { list, _ in
+                continuation.resume(returning: list)
+            }
+        }
+        localOnlyRuleList = list
+        return list
+    }
+
+    /// Only the local preview and the blank standby page may load in the render view.
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
+        guard let scheme = action.request.url?.scheme?.lowercased() else { return .cancel }
+        return scheme == "file" || scheme == "about" ? .allow : .cancel
+    }
+
     private func finishLoading(_ result: Result<Void, Error>) {
         previewNavigation = nil
         loaded?.resume(with: result)
@@ -338,4 +427,13 @@ private final class OnceFlag: @unchecked Sendable {
             return !claimed
         }
     }
+}
+
+/// Lets a cancellation handler close an XPC connection; invalidating is safe from any thread.
+private final class ConnectionCloser: @unchecked Sendable {
+    private let connection: NSXPCConnection
+
+    init(_ connection: NSXPCConnection) { self.connection = connection }
+
+    func close() { connection.invalidate() }
 }

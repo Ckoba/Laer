@@ -33,6 +33,21 @@ struct SearchDocumentWork {
     var resource: Resource?
 }
 
+enum CalendarWeekLoad {
+    case loaded([CalendarEvent], isComplete: Bool)
+    case failed(String)
+    case cancelled
+}
+
+extension ThreadList {
+    /// A continuation must move strictly backward, even when the service repeats a boundary row.
+    func nextConversationCursor(after previous: Int64?) -> Int64? {
+        guard hasMore, let cursor = threads.last(where: { $0.sortIndex != nil })?.sortIndex,
+              previous.map({ cursor < $0 }) ?? true else { return nil }
+        return cursor
+    }
+}
+
 extension AppModel {
     /// Starred courses are the active ones. With none starred, every course counts as active.
     var activeCourses: [Course] {
@@ -46,24 +61,28 @@ extension AppModel {
     }
 
     func refreshStarred() async {
+        let session = CollectionSession(self)
         do {
             let result = try await fetch(key: "starred") { try await $0.starredCourses() }
+            guard session.isCurrent(self), result.isComplete else { return }
             let ids = result.items.filter { $0.isFavourite != false }.map(\.courseId)
             starredIds = Set(ids)
-            try? await snapshots?.save(ids.map(StoredId.init), collection: "starred", coverage: .complete, checkpoint: nil, at: Date())
+            try? await session.store?.save(ids.map(StoredId.init), collection: "starred", coverage: .complete, checkpoint: nil, at: Date())
         } catch {
             // The saved list stays. Courses still show, grouped as they were.
         }
     }
 
     func toggleActive(_ course: Course) async {
+        let session = CollectionSession(self)
         let id = course.courseId
         do {
             try await write { try await $0.toggleFavorite(courseId: id) }
+            guard session.isCurrent(self) else { return }
             if starredIds.contains(id) { starredIds.remove(id) } else { starredIds.insert(id) }
             await refreshStarred()
         } catch {
-            sessionNoticeIfNeeded(error)
+            if session.isCurrent(self) { sessionNoticeIfNeeded(error) }
         }
     }
 
@@ -86,7 +105,7 @@ extension AppModel {
     func open(_ resource: Resource) async {
         Perf.mark("file open requested")
         let store = snapshots
-        if let url = await savedFileURL(for: resource) {
+        if let url = await savedFileURL(for: resource, keep: true) {
             guard !Task.isCancelled, store === snapshots else { return }
             viewerItem = ViewerItem(id: resource.id, title: resource.title, fileURL: url)
             if let asset = savedAssets[resource.id] { queueDocumentSearch(asset, resource: resource) }
@@ -129,9 +148,19 @@ extension AppModel {
     }
 
     /// Saved events for a week, for showing before the refresh returns.
+    func cachedWeekEvents(weekContaining date: Date) async -> Snapshot<CalendarEvent>? {
+        let session = CollectionSession(self)
+        guard let week = Calendar.current.dateInterval(of: .weekOfYear, for: date) else { return nil }
+        let cached = await session.store?.load(CalendarEvent.self, collection: Self.weekEventsKey(week.start))
+        return session.isCurrent(self) ? cached : nil
+    }
+
     func cachedEvents(weekContaining date: Date) async -> [CalendarEvent] {
-        guard let week = Calendar.current.dateInterval(of: .weekOfYear, for: date) else { return [] }
-        return await snapshots?.load(CalendarEvent.self, collection: "events-\(Int(week.start.timeIntervalSince1970))")?.records ?? []
+        await cachedWeekEvents(weekContaining: date)?.records ?? []
+    }
+
+    private static func weekEventsKey(_ start: Date) -> String {
+        "events-\(Int(start.timeIntervalSince1970))"
     }
 
     func open(_ element: PlanPreview.Element, courseId: Int?) async {
@@ -144,8 +173,9 @@ extension AppModel {
             Task {
                 guard let downloads, let asset = await downloads.asset(for: document.resourceKey),
                       asset.relativePath == document.version, downloads === self.downloads else { return }
-                let url = await downloads.fileURL(for: asset)
-                guard downloads === self.downloads, savedAssets[asset.id] == asset else { return }
+                await keepSavedAsset(asset.id, store: downloads)
+                guard downloads === self.downloads, savedAssets[asset.id]?.relativePath == asset.relativePath,
+                      let url = downloads.fileURLIfPresent(for: asset) else { return }
                 viewerItem = ViewerItem(id: asset.id, title: hit.title, fileURL: url, startPage: document.page,
                                         searchMatch: document.recognizedText == true ? nil : hit.matchedText)
                 if let resource = hit.resource { noteRecent(resource) }
@@ -157,6 +187,15 @@ extension AppModel {
             if let resource = hit.resource, !resource.isFolder {
                 let store = snapshots
                 Task {
+                    if let saved = await savedFileURL(for: resource, keep: true) {
+                        guard store === snapshots, !Task.isCancelled else { return }
+                        if DownloadStore.canOpenDirectlyInDefaultApp(pathExtension: saved.pathExtension) {
+                            NSWorkspace.shared.open(saved)
+                        } else {
+                            NSWorkspace.shared.activateFileViewerSelecting([saved])
+                        }
+                        return
+                    }
                     if FileAcquirer.canAttempt(resource) { await open(resource) }
                     guard store === snapshots, viewerItem?.id != resource.id else { return }
                     if let url = absoluteURL(hit.url), let origin = site?.baseURL, AvatarSession.sameOrigin(url, origin) {
@@ -179,24 +218,42 @@ extension AppModel {
 
     // MARK: - Calendar
 
-    /// A week's events. Shows the saved copy when the service can't be reached.
+    /// A week's events for callers that can use the saved copy when refresh fails.
     func events(weekContaining date: Date) async -> [CalendarEvent] {
-        let store = snapshots
-        let calendar = Calendar.current
-        guard let week = calendar.dateInterval(of: .weekOfYear, for: date) else { return [] }
-        let key = "events-\(Int(week.start.timeIntervalSince1970))"
+        let session = CollectionSession(self)
+        switch await loadWeekEvents(weekContaining: date) {
+        case .loaded(let items, _): return session.isCurrent(self) ? items : []
+        case .failed:
+            guard session.isCurrent(self) else { return [] }
+            return await cachedEvents(weekContaining: date)
+        case .cancelled: return []
+        }
+    }
+
+    func loadWeekEvents(weekContaining date: Date) async -> CalendarWeekLoad {
+        let session = CollectionSession(self)
+        guard let week = Calendar.current.dateInterval(of: .weekOfYear, for: date) else {
+            return .failed(String(localized: "The week couldn’t be loaded."))
+        }
+        let key = Self.weekEventsKey(week.start)
         do {
-            let start = week.start
-            let result = try await fetch(key: key) { try await $0.calendarEvents(from: start) }
+            let result = try await fetch(key: key) { try await $0.calendarEvents(from: week.start, toDate: week.end) }
+            guard session.isCurrent(self) else { return .cancelled }
             let items = result.items.filter { ($0.fromDate ?? .distantFuture) < week.end }
-            guard !Task.isCancelled, store === snapshots else { return [] }
-            if result.isComplete { try? await store?.save(items, collection: key, coverage: .complete, checkpoint: nil, at: Date()) }
-            await indexEvents(items, store: store)
-            return items
+            if result.isComplete {
+                try? await session.store?.save(items, collection: key, coverage: .complete, checkpoint: nil, at: Date())
+            }
+            guard session.isCurrent(self) else { return .cancelled }
+            await indexEvents(items, store: session.store)
+            guard session.isCurrent(self) else { return .cancelled }
+            return .loaded(items, isComplete: result.isComplete)
+        } catch is CancellationError {
+            return .cancelled
+        } catch RefreshError.staleGeneration {
+            return .cancelled
         } catch {
-            sessionNoticeIfNeeded(error)
-            guard !Task.isCancelled, store === snapshots else { return [] }
-            return await store?.load(CalendarEvent.self, collection: key)?.records ?? []
+            guard session.isCurrent(self) else { return .cancelled }
+            return .failed(message(for: error))
         }
     }
 
@@ -224,9 +281,10 @@ extension AppModel {
     func loadSearchIndex() async {
         guard let store = snapshots else { return }
         let coverage = await store.load(SearchCoverage.self, collection: "search-coverage")
+        guard store === snapshots, !Task.isCancelled else { return }
         do {
             let index = try await store.searchDatabase()
-            guard store === snapshots else { return }
+            guard store === snapshots, !Task.isCancelled else { return }
             searchIndex = index
             searchIndexFailed = false
             searchIndexedAt = coverage?.records.first?.hasPendingWork == false ? coverage?.lastSuccess : nil
@@ -293,13 +351,9 @@ extension AppModel {
             }
             let id = course.courseId
             do {
-                let result = try await fetch(key: "plans-\(id)") { try await $0.plans(courseId: id) }
+                let result = try await searchCollection(key: "plans-\(id)", store: store) { try await $0.plans(courseId: id) }
                 await indexPlans(result, courseId: id, store: store)
-                if result.isComplete {
-                    try await store.save(result.items, collection: "plans-\(id)", coverage: .complete, checkpoint: nil, at: Date())
-                } else {
-                    complete = false
-                }
+                if !result.isComplete { complete = false }
             } catch {
                 complete = false
             }
@@ -322,8 +376,7 @@ extension AppModel {
         guard !Task.isCancelled, store === snapshots else { return }
         if ParityGate.messages {
             do {
-                let threads = try await fetch(key: "search-recent-threads") { try await $0.messageThreads(pageSize: 30) }
-                await indexThreads(threads.threads, store: store)
+                if !(try await indexRecentThreads(store: store)) { complete = false }
             } catch {
                 complete = false
             }
@@ -349,6 +402,52 @@ extension AppModel {
                               coverage: searchCoverageIncomplete ? .incomplete : .complete, checkpoint: nil, at: Date())
     }
 
+    private func searchCollection<Record: Codable & Sendable>(
+        key: String, store: SnapshotStore, read: @escaping @Sendable (ItslearningClient) async throws -> PagedResult<Record>
+    ) async throws -> PagedResult<Record> {
+        let cached = await store.load(Record.self, collection: key)
+        try Task.checkCancellation()
+        guard store === snapshots else { throw RefreshError.staleGeneration }
+        if let cached, cached.coverage == .complete, Date().timeIntervalSince(cached.lastSuccess) < FreshnessLine.staleAfter {
+            return PagedResult(items: cached.records, isComplete: true)
+        }
+        let result = try await fetch(key: key, read)
+        try Task.checkCancellation()
+        guard store === snapshots else { throw RefreshError.staleGeneration }
+        if result.isComplete {
+            try await store.save(result.items, collection: key, coverage: .complete, checkpoint: nil, at: Date())
+        }
+        try Task.checkCancellation()
+        guard store === snapshots else { throw RefreshError.staleGeneration }
+        return result
+    }
+
+    /// Indexes a recent window, allowing for sites that return fewer threads than requested per page.
+    private func indexRecentThreads(store: SnapshotStore) async throws -> Bool {
+        let session = CollectionSession(self)
+        var before: Int64?
+        var seen: Set<Int> = []
+        var threads: [MessageThread] = []
+        var reachedWindow = true
+        for _ in 0..<10 {
+            guard session.isCurrent(self) else { throw RefreshError.staleGeneration }
+            let cursor = before
+            let page = try await fetch(key: "search-recent-threads-\(cursor.map(String.init) ?? "first")") {
+                try await $0.messageThreads(before: cursor, pageSize: 30)
+            }
+            threads += page.threads.filter { seen.insert($0.threadId).inserted }
+            guard page.hasMore else { break }
+            guard let next = page.nextConversationCursor(after: cursor) else {
+                reachedWindow = false
+                break
+            }
+            before = next
+        }
+        guard session.isCurrent(self) else { throw RefreshError.staleGeneration }
+        await indexThreads(threads, store: store)
+        return reachedWindow
+    }
+
     private func indexFolders(in course: Course, store: SnapshotStore) async -> Bool {
         let courseId = course.courseId
         let key = "search-folders-\(courseId)"
@@ -360,7 +459,7 @@ extension AppModel {
             guard !cursor.pending.isEmpty else { return true }
             let folder = cursor.pending.removeFirst()
             do {
-                let result = try await fetch(key: Self.folderKey(courseId: courseId, folderId: folder.id)) { client in
+                let result = try await searchCollection(key: Self.folderKey(courseId: courseId, folderId: folder.id), store: store) { client in
                     if let id = folder.id {
                         return try await client.folderResources(courseId: courseId, folderId: id)
                     }
@@ -374,8 +473,6 @@ extension AppModel {
                     cursor.pending.append(.init(id: child.elementId, context: "\(folder.context) › \(child.title)"))
                 }
                 if result.isComplete {
-                    try await store.save(result.items, collection: Self.folderKey(courseId: courseId, folderId: folder.id),
-                                         coverage: .complete, checkpoint: nil, at: Date())
                     if let id = folder.id { cursor.visited.insert(id) }
                 } else {
                     cursor.pending.append(folder)

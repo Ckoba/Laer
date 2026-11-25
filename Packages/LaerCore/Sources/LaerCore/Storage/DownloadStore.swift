@@ -9,6 +9,27 @@ public struct LocalAsset: Codable, Sendable, Hashable, Identifiable {
     public var byteCount: Int64
     public var contentType: String?
     public var downloadedAt: Date
+    /// Fetched ahead of time by Laer rather than saved by the person. Only these may be evicted
+    /// to stay within a space limit; a file the person saved is never removed automatically.
+    public var isAutoPrefetched: Bool = false
+}
+
+extension LocalAsset {
+    private enum CodingKeys: String, CodingKey {
+        case id, relativePath, displayName, byteCount, contentType, downloadedAt, isAutoPrefetched
+    }
+
+    /// Manifests written before `isAutoPrefetched` existed decode as person-saved files.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        relativePath = try container.decode(String.self, forKey: .relativePath)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        byteCount = try container.decode(Int64.self, forKey: .byteCount)
+        contentType = try container.decodeIfPresent(String.self, forKey: .contentType)
+        downloadedAt = try container.decode(Date.self, forKey: .downloadedAt)
+        isAutoPrefetched = try container.decodeIfPresent(Bool.self, forKey: .isAutoPrefetched) ?? false
+    }
 }
 
 public enum DownloadError: Error, Equatable, Sendable {
@@ -19,7 +40,9 @@ public enum DownloadError: Error, Equatable, Sendable {
 }
 
 /// Saved files for one account, tracked by a manifest beside the Downloads directory.
-/// Files are only removed by `remove(resourceKey:)` or when a newer revision has been committed.
+/// Files are only removed by `remove(resourceKey:)`, `removeAllDownloadedFiles()`, when a newer
+/// revision has been committed, or (for files Laer fetched ahead itself) by
+/// `evictAutoPrefetchedIfNeeded(maxBytes:)`.
 public actor DownloadStore {
     private let accountDirectory: URL
     private let downloadsDirectory: URL
@@ -27,6 +50,7 @@ public actor DownloadStore {
     private var entries: [String: LocalAsset]?
     /// Set when an unreadable manifest could not be moved aside; writing would destroy it.
     private var manifestBlocked = false
+    private var isRetired = false
 
     public init(rootDirectory: URL, accountKey: String) {
         accountDirectory = AccountDirectory.url(root: rootDirectory, accountKey: accountKey)
@@ -37,9 +61,13 @@ public actor DownloadStore {
     /// Validates the staged file, moves it to a new opaque path and records it.
     /// The previous revision is deleted only after the manifest has been written.
     /// If validation fails the staged file is left where it is.
+    /// `isAutoPrefetched` marks a file Laer fetched on its own; a newer revision of a file the person
+    /// saved stays person-saved.
     public func commit(
-        stagedFile: URL, resourceKey: String, suggestedName: String, contentType: String?, at date: Date
+        stagedFile: URL, resourceKey: String, suggestedName: String, contentType: String?, at date: Date,
+        isAutoPrefetched: Bool = false
     ) throws -> LocalAsset {
+        guard !isRetired else { throw CancellationError() }
         try Self.validate(fileAt: stagedFile, contentType: contentType)
         var current = loadEntries()
         guard !manifestBlocked else { throw DownloadError.writeFailed }
@@ -57,10 +85,11 @@ public actor DownloadStore {
         }
 
         let size = (try? fileManager.attributesOfItem(atPath: destination.path)[.size] as? NSNumber)?.int64Value ?? 0
+        let previous = current[resourceKey]
         let asset = LocalAsset(
             id: resourceKey, relativePath: relativePath, displayName: displayName,
-            byteCount: size, contentType: contentType, downloadedAt: date)
-        let previous = current[resourceKey]
+            byteCount: size, contentType: contentType, downloadedAt: date,
+            isAutoPrefetched: isAutoPrefetched && (previous?.isAutoPrefetched ?? true))
         current[resourceKey] = asset
         do {
             try writeManifest(current)
@@ -110,6 +139,91 @@ public actor DownloadStore {
         }
         entries = current
         try? FileManager.default.removeItem(at: fileURL(for: asset))
+    }
+
+    /// The person chose to keep a file Laer fetched ahead, so it is no longer evictable.
+    public func markKept(resourceKey: String) throws {
+        var current = loadEntries()
+        guard var asset = current[resourceKey], asset.isAutoPrefetched else { return }
+        guard !manifestBlocked else { throw DownloadError.writeFailed }
+        asset.isAutoPrefetched = false
+        current[resourceKey] = asset
+        do {
+            try writeManifest(current)
+        } catch {
+            throw DownloadError.writeFailed
+        }
+        entries = current
+    }
+
+    /// Removes files Laer fetched ahead, oldest first, until together they take at most `maxBytes`.
+    /// Files the person saved are never touched and do not count towards the limit.
+    /// Returns the resource keys that were removed.
+    @discardableResult
+    public func evictAutoPrefetchedIfNeeded(maxBytes: UInt64) throws -> [String] {
+        var current = loadEntries()
+        let prefetched = current.values.filter(\.isAutoPrefetched)
+        var total = prefetched.reduce(UInt64(0)) { $0 + UInt64(max(0, $1.byteCount)) }
+        guard total > maxBytes else { return [] }
+        guard !manifestBlocked else { throw DownloadError.writeFailed }
+        var evicted: [LocalAsset] = []
+        for asset in prefetched.sorted(by: { ($0.downloadedAt, $0.id) < ($1.downloadedAt, $1.id) }) {
+            guard total > maxBytes else { break }
+            current.removeValue(forKey: asset.id)
+            evicted.append(asset)
+            total -= UInt64(max(0, asset.byteCount))
+        }
+        // The manifest goes first, so a failure leaves every file usable.
+        do {
+            try writeManifest(current)
+        } catch {
+            throw DownloadError.writeFailed
+        }
+        entries = current
+        for asset in evicted { try? FileManager.default.removeItem(at: fileURL(for: asset)) }
+        return evicted.map(\.id)
+    }
+
+    /// Explicit user action (signing out and removing local data): deletes every saved file and
+    /// the manifest, including any unreadable manifest kept aside.
+    public func removeAllDownloadedFiles(retire: Bool = false) throws {
+        if retire { isRetired = true }
+        let fileManager = FileManager.default
+        var failed = false
+        if fileManager.fileExists(atPath: downloadsDirectory.path) {
+            do { try fileManager.removeItem(at: downloadsDirectory) } catch { failed = true }
+        }
+        let leftovers = (try? fileManager.contentsOfDirectory(atPath: accountDirectory.path)) ?? []
+        for name in leftovers where name.hasPrefix("download-manifest") {
+            do {
+                try fileManager.removeItem(at: accountDirectory.appendingPathComponent(name))
+            } catch {
+                failed = true
+            }
+        }
+        entries = failed ? nil : [:]
+        manifestBlocked = false
+        if failed { throw DownloadError.writeFailed }
+    }
+
+    // MARK: - Opening
+
+    /// Formats that are safe to hand to the default app: documents, text, raster images and media.
+    /// Anything else (disk images, archives, installers, scripts, profiles, web pages, SVG, web
+    /// archives) is only shown in Finder, where macOS applies its own checks before opening.
+    private static let directlyOpenableExtensions: Set<String> = [
+        "pdf",
+        "doc", "docx", "dot", "dotx", "rtf", "xls", "xlsx", "xlt", "xltx", "ppt", "pptx", "pps", "ppsx", "pot", "potx",
+        "pages", "numbers", "key",
+        "odt", "ods", "odp", "odg",
+        "txt", "text", "md", "markdown", "csv", "tsv", "json",
+        "png", "jpg", "jpeg", "gif", "heic", "heif", "tif", "tiff", "bmp", "webp",
+        "mp3", "m4a", "aac", "wav", "aif", "aiff", "flac", "ogg",
+        "mp4", "m4v", "mov",
+    ]
+
+    public static func canOpenDirectlyInDefaultApp(pathExtension: String) -> Bool {
+        directlyOpenableExtensions.contains(pathExtension.lowercased())
     }
 
     /// Rejects web pages served in place of a file, judged by content type and leading bytes.
@@ -190,6 +304,7 @@ public actor DownloadStore {
     }
 
     private func loadEntries() -> [String: LocalAsset] {
+        guard !isRetired else { return [:] }
         if let entries { return entries }
         var loaded: [String: LocalAsset] = [:]
         if let data = try? Data(contentsOf: manifestURL) {

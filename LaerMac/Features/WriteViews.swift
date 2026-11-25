@@ -54,7 +54,6 @@ enum WriteText {
         case APIError.notFound: "This is no longer available."
         case APIError.throttled: "The service asked Laer to slow down. Try again later."
         case APIError.server: "The service had a problem. Check whether it went through before trying again."
-        case is LocalFileError: "The file could not be read."
         default: "That didn't go through. Check before trying again."
         }
     }
@@ -62,40 +61,117 @@ enum WriteText {
 
 // MARK: - Files
 
-struct LocalFileError: Error {}
+private enum LocalFileError: Error {
+    case unreadable
+    case fileTooLarge
+    case totalTooLarge
+
+    var message: String {
+        switch self {
+        case .unreadable: String(localized: "An attachment couldn’t be read or its size couldn’t be verified.")
+        case .fileTooLarge: String(localized: "Each attachment must be 50 MiB or smaller.")
+        case .totalTooLarge: String(localized: "Attachments must total 100 MiB or less.")
+        }
+    }
+}
 
 /// A file the user picked, read into memory for one upload.
-struct PickedFile: Identifiable, Hashable {
+struct PickedFile: Identifiable, Sendable {
     let id = UUID()
     let name: String
     let contentType: String
     let data: Data
 
     var part: UploadPart { UploadPart(fileName: name, contentType: contentType, data: data) }
+}
 
-    /// Shows an open panel. Large files are refused here rather than half-uploaded.
-    @MainActor
-    static func pick(maxBytes: Int = 100 * 1024 * 1024) throws -> [PickedFile] {
+@MainActor
+@Observable
+final class AttachmentDraft {
+    private(set) var files: [PickedFile] = []
+    private(set) var error: String?
+    private(set) var isLoading = false
+
+    func pick() async {
+        guard !isLoading else { return }
+        error = nil
+        isLoading = true
+        defer { isLoading = false }
+
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        guard panel.runModal() == .OK else { return [] }
-        return try panel.urls.map { url in
-            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentTypeKey])
-            if let size = values?.fileSize, size > maxBytes { throw LocalFileError() }
-            guard let data = try? Data(contentsOf: url) else { throw LocalFileError() }
-            let type = values?.contentType?.preferredMIMEType ?? "application/octet-stream"
+        guard panel.runModal() == .OK, !Task.isCancelled else { return }
+
+        let urls = panel.urls
+        let existingBytes = files.reduce(0) { $0 + $1.data.count }
+        let read = Task.detached(priority: .userInitiated) { try Self.read(urls, existingBytes: existingBytes) }
+        do {
+            let picked = try await withTaskCancellationHandler {
+                try await read.value
+            } onCancel: {
+                read.cancel()
+            }
+            try Task.checkCancellation()
+            files += picked
+        } catch is CancellationError {
+            return
+        } catch {
+            self.error = (error as? LocalFileError ?? .unreadable).message
+        }
+    }
+
+    func remove(_ id: UUID) {
+        files.removeAll { $0.id == id }
+    }
+
+    func clear() {
+        files = []
+        error = nil
+    }
+
+    nonisolated private static func read(_ urls: [URL], existingBytes: Int) throws -> [PickedFile] {
+        let perFileLimit = 50 * 1024 * 1024
+        let totalLimit = 100 * 1024 * 1024
+        var remaining = totalLimit - existingBytes
+        return try urls.map { url in
+            try Task.checkCancellation()
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentTypeKey])
+            guard values.isRegularFile == true, let size = values.fileSize, size >= 0 else {
+                throw LocalFileError.unreadable
+            }
+            guard size <= perFileLimit else { throw LocalFileError.fileTooLarge }
+            guard size <= remaining else { throw LocalFileError.totalTooLarge }
+
+            // Bound the actual read as well, in case the file grows after the metadata check.
+            let limit = min(perFileLimit, remaining)
+            let file = try FileHandle(forReadingFrom: url)
+            defer { try? file.close() }
+            var data = Data()
+            data.reserveCapacity(size)
+            while data.count <= limit {
+                try Task.checkCancellation()
+                let count = min(1024 * 1024, limit + 1 - data.count)
+                guard let chunk = try file.read(upToCount: count), !chunk.isEmpty else { break }
+                data.append(chunk)
+            }
+            guard data.count <= perFileLimit else { throw LocalFileError.fileTooLarge }
+            guard data.count <= remaining else { throw LocalFileError.totalTooLarge }
+            remaining -= data.count
+            let type = values.contentType?.preferredMIMEType ?? "application/octet-stream"
             return PickedFile(name: url.lastPathComponent, contentType: type, data: data)
         }
     }
 }
 
-/// Picked files, each removable before sending.
+/// Picked files, each removable before sending, and feedback for the selection in progress.
 struct AttachmentList: View {
-    @Binding var files: [PickedFile]
+    let draft: AttachmentDraft
 
     var body: some View {
-        ForEach(files) { file in
+        ForEach(draft.files) { file in
             HStack(spacing: Space.s6) {
                 Image(systemName: Symbol.material)
                     .font(.system(size: 12, weight: .regular))
@@ -108,11 +184,17 @@ struct AttachmentList: View {
                 Text(Int64(file.data.count).formatted(.byteCount(style: .file)))
                     .font(Type.t11)
                     .foregroundStyle(Color.textMuted)
-                IconButton(Symbol.close, label: "Remove \(file.name)") {
-                    files.removeAll { $0.id == file.id }
-                }
+                IconButton(Symbol.close, label: "Remove \(file.name)") { draft.remove(file.id) }
+                    .disabled(draft.isLoading)
             }
         }
+        if draft.isLoading {
+            HStack(spacing: Space.s6) {
+                Spinner()
+                Text("Reading attachments…").font(Type.t11).foregroundStyle(Color.textMuted)
+            }
+        }
+        if let error = draft.error { ErrorLine(error) }
     }
 }
 
@@ -172,6 +254,7 @@ struct MessageComposerBar: View {
     @Binding var text: String
     let canSend: Bool
     let isSending: Bool
+    var isReadingAttachments = false
     let onAttach: () -> Void
     let onSend: () -> Void
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -189,7 +272,7 @@ struct MessageComposerBar: View {
             .buttonStyle(.bordered)
             .help("Attach files")
             .accessibilityLabel("Attach files")
-            .disabled(isSending)
+            .disabled(isSending || isReadingAttachments)
 
             TextField(label, text: $text, axis: .vertical)
                 .textFieldStyle(.plain)
@@ -251,14 +334,13 @@ struct NewMessageView: View {
     @State private var searchState = CollectionState()
     @State private var recipients: [Recipient] = []
     @State private var text = ""
-    @State private var files: [PickedFile] = []
+    @State private var attachments = AttachmentDraft()
     @State private var action = WriteAction()
-    @State private var pickError: String?
     @FocusState private var toFocused: Bool
 
     private var canSend: Bool {
-        !action.isRunning && !recipients.isEmpty
-            && (!text.isBlank || !files.isEmpty)
+        !action.isRunning && !attachments.isLoading && !recipients.isEmpty
+            && (!text.isBlank || !attachments.files.isEmpty)
     }
 
     /// One centred column, at most `readingMax` wide, with equal space left and right.
@@ -290,21 +372,18 @@ struct NewMessageView: View {
             Rectangle().fill(Color.border).frame(height: 1)
             column {
                 VStack(alignment: .leading, spacing: Space.s6) {
-                    AttachmentList(files: $files).disabled(action.isRunning)
+                    AttachmentList(draft: attachments).disabled(action.isRunning)
                     MessageComposerBar(label: "Message", text: $text, canSend: canSend, isSending: action.isRunning,
-                        onAttach: {
-                            pickError = nil
-                            do { files += try PickedFile.pick() } catch { pickError = WriteText.failure(error) }
-                        }, onSend: { Task { await send() } })
+                        isReadingAttachments: attachments.isLoading,
+                        onAttach: { Task { await attachments.pick() } }, onSend: { Task { await send() } })
                     if case .failed(let message) = action.phase { ErrorLine(message) }
-                    if let pickError { ErrorLine(pickError) }
                 }
                 .padding(.vertical, Space.s12)
             }
         }
         .background(Color.stage)
         .task(id: query) { await search(query) }
-        .unsentDraft(!text.isBlank || !files.isEmpty)
+        .unsentDraft(!text.isBlank || !attachments.files.isEmpty)
     }
 
     /// Chosen people, the field that finds more, and the matches under it.
@@ -383,8 +462,9 @@ struct NewMessageView: View {
     }
 
     private func send() async {
+        guard canSend else { return }
         let body = text
-        let parts = files.map(\.part)
+        let parts = attachments.files.map(\.part)
         let ids = recipients.map(\.recipientId)
         var threadId: Int?
         let sent = await action.run {
@@ -537,13 +617,12 @@ struct AssignmentView: View {
     let onClose: () -> Void
     @State private var loader: CollectionLoader<Assignment>
     @State private var text = ""
-    @State private var files: [PickedFile] = []
+    @State private var attachments = AttachmentDraft()
     @State private var submit = WriteAction()
-    @State private var pickError: String?
     @State private var submittedAnswer: Int?
 
     /// An answer typed or attached but not submitted.
-    private var hasDraft: Bool { !text.isBlank || !files.isEmpty }
+    private var hasDraft: Bool { !text.isBlank || !attachments.files.isEmpty }
 
     init(elementId: Int, title: String, onClose: @escaping () -> Void) {
         self.elementId = elementId
@@ -659,12 +738,11 @@ struct AssignmentView: View {
                 EmptyLine("The deadline has passed and late answers are not accepted")
             } else {
                 TextArea(label: "Answer text", text: $text, minHeight: 120)
-                AttachmentList(files: $files)
+                AttachmentList(draft: attachments)
+                    .disabled(submit.isRunning)
                 HStack(spacing: Space.s8) {
-                    IconButton(Symbol.attach, label: "Attach files") {
-                        pickError = nil
-                        do { files += try PickedFile.pick() } catch { pickError = WriteText.failure(error) }
-                    }
+                    IconButton(Symbol.attach, label: "Attach files") { Task { await attachments.pick() } }
+                        .disabled(attachments.isLoading || submit.isRunning)
                     // The paperclip itself, not its hover square, starts on the answer box's edge.
                     .padding(.leading, -Space.s6)
                     // What Submit will send, said before it is pressed.
@@ -674,9 +752,8 @@ struct AssignmentView: View {
                     Spacer(minLength: Space.s8)
                     if submit.isRunning { Spinner() }
                     if case .failed(let message) = submit.phase { ErrorLine(message) }
-                    if let pickError { ErrorLine(pickError) }
                     TextButton("Submit", role: .primary) { Task { await send() } }
-                        .disabled(submit.isRunning || (text.isBlank && files.isEmpty))
+                        .disabled(submit.isRunning || attachments.isLoading || (text.isBlank && attachments.files.isEmpty))
                 }
             }
         }
@@ -690,7 +767,7 @@ struct AssignmentView: View {
     /// What Submit will send, said before it is pressed.
     private var summary: String {
         let hasText = !text.isBlank
-        switch (hasText, files.count) {
+        switch (hasText, attachments.files.count) {
         case (false, 0): return ""
         case (true, 0): return "Submits your text"
         case (false, let n): return n == 1 ? "Submits 1 file" : "Submits \(n) files"
@@ -699,6 +776,7 @@ struct AssignmentView: View {
     }
 
     private func send() async {
+        guard !submit.isRunning, !attachments.isLoading, hasDraft else { return }
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let html = body.isEmpty ? nil : body
             .replacingOccurrences(of: "&", with: "&amp;")
@@ -707,7 +785,7 @@ struct AssignmentView: View {
             .components(separatedBy: "\n\n")
             .map { "<p>\($0.replacingOccurrences(of: "\n", with: "<br>"))</p>" }
             .joined()
-        let parts = files.map(\.part)
+        let parts = attachments.files.map(\.part)
         let elementId = elementId
         var answer: Int?
         let ok = await submit.run {
@@ -720,7 +798,7 @@ struct AssignmentView: View {
         if ok {
             submittedAnswer = answer
             text = ""
-            files = []
+            attachments.clear()
         }
     }
 }

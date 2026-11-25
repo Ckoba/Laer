@@ -54,7 +54,9 @@ final class LectureBriefs {
     func open(root: URL, accountKey: String) async {
         let store = GeneratedBriefStore(rootDirectory: root, accountKey: accountKey)
         self.store = store
-        generated = await store.all()
+        let cached = await store.all()
+        guard self.store === store, !Task.isCancelled else { return }
+        generated = cached
     }
 
     func close() {
@@ -101,13 +103,13 @@ extension AppModel {
         guard briefs.isEnabled, briefs.isAvailable else { return }
         guard !briefs.queue.contains(where: { $0.plan.planId == plan.planId }) else { return }
         briefs.queue.append((plan, courseId))
-        guard briefs.worker == nil else { return }
+        guard briefs.worker == nil, let store = briefs.store else { return }
         briefs.worker = Task(priority: .utility) { [weak self] in
-            while let self, !Task.isCancelled, !self.briefs.queue.isEmpty {
+            while let self, !Task.isCancelled, self.briefs.store === store, !self.briefs.queue.isEmpty {
                 let next = self.briefs.queue.removeFirst()
                 await self.generateBrief(for: next.plan, courseId: next.courseId)
             }
-            self?.briefs.worker = nil
+            if let self, self.briefs.store === store, !Task.isCancelled { self.briefs.worker = nil }
         }
     }
 
@@ -121,14 +123,14 @@ extension AppModel {
                   ReadingExtractor.canRead(url) else { return nil }
             return (asset, url, resource.title)
         }
-        guard !saved.isEmpty else { return }
+        guard !saved.isEmpty, let store = briefs.store else { return }
         let sourceKey = GeneratedBrief.sourceKey(saved.map(\.asset))
         let attempt = "\(plan.planId)|\(sourceKey)"
         guard briefs.generated[plan.planId]?.sourceKey != sourceKey, !briefs.attempted.contains(attempt) else { return }
         briefs.attempted.insert(attempt)
 
         briefs.setWorking(plan.planId)
-        defer { briefs.setWorking(nil) }
+        defer { if briefs.store === store { briefs.setWorking(nil) } }
         BriefLog.log.notice("brief started")
         // Slides become PDFs first, through the same converter and cache the viewer uses.
         var files: [(url: URL, title: String)] = []

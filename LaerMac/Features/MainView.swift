@@ -95,15 +95,14 @@ struct MainView: View {
             model.updateSearchOCR()
         }
         .focusedSceneValue(\.openPalette, PaletteAction { openPalette() })
-        .alert("Make lecture briefs on this Mac?", isPresented: Binding(
-            get: { model.briefs.shouldAsk },
-            set: { _ in }
-        )) {
-            Button("Turn On") { Task { await model.setOnDeviceBriefs(true) } }
-            Button("Not Now", role: .cancel) { Task { await model.setOnDeviceBriefs(false) } }
-        } message: {
-            Text("Laer can use Apple Intelligence to write a short brief for upcoming lectures from the readings you save. It runs on this Mac and nothing is sent anywhere. You can change this later in the Laer menu.")
+        .overlay(alignment: .bottomTrailing) {
+            if model.shouldPromptOptionalFeatures && !navigation.isPaletteOpen {
+                OptionalFeaturesCard()
+                    .padding(Space.s16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
+        .animation(.easeOut(duration: 0.2), value: model.shouldPromptOptionalFeatures)
         // A file opened from the menu bar shows its course on Plans, where the file lives.
         .onAppear(perform: takePlansTabRequest)
         .onChange(of: model.plansTabRequest) { _, _ in takePlansTabRequest() }
@@ -223,6 +222,78 @@ struct MainView: View {
     }
 }
 
+/// Quiet, non-blocking first-run corner card letting the user opt in to prefetching and on-device briefs.
+private struct OptionalFeaturesCard: View {
+    @Environment(AppModel.self) private var model
+    @State private var fetchAhead = false
+    @State private var lectureBriefs = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s12) {
+            HStack(alignment: .top, spacing: Space.s8) {
+                VStack(alignment: .leading, spacing: Space.s2) {
+                    Text("Optional features")
+                        .font(Type.t13.weight(.semibold))
+                        .foregroundStyle(Color.text)
+                    Text("Both start off. You can change these anytime in Settings.")
+                        .font(Type.t11)
+                        .foregroundStyle(Color.textMuted)
+                }
+                Spacer(minLength: 0)
+                IconButton(Symbol.close, label: "Dismiss", symbolSize: 11) {
+                    Task { await model.dismissOptionalFeaturesPrompt(fetchAhead: false, lectureBriefs: false) }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: Space.s8) {
+                Toggle(isOn: $fetchAhead) {
+                    VStack(alignment: .leading, spacing: Space.s2) {
+                        Text("Get files before you open them")
+                            .font(Type.t12)
+                            .foregroundStyle(Color.text)
+                        Text("Preloads links and upcoming readings (up to 300 MiB) so files open at once.")
+                            .font(Type.t11)
+                            .foregroundStyle(Color.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+
+                if model.briefs.isAvailable {
+                    Toggle(isOn: $lectureBriefs) {
+                        VStack(alignment: .leading, spacing: Space.s2) {
+                            Text("Make lecture briefs on this Mac")
+                                .font(Type.t12)
+                                .foregroundStyle(Color.text)
+                            Text("On-device Apple Intelligence summaries from readings you save. Nothing is sent.")
+                                .font(Type.t11)
+                                .foregroundStyle(Color.textMuted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                }
+            }
+
+            HStack {
+                Spacer(minLength: 0)
+                TextButton("Done", role: .primary) {
+                    Task { await model.dismissOptionalFeaturesPrompt(fetchAhead: fetchAhead, lectureBriefs: lectureBriefs) }
+                }
+            }
+        }
+        .padding(Space.s16)
+        .frame(width: 344, alignment: .leading)
+        .background(Color.stage, in: RoundedRectangle(cornerRadius: Radius.l, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Radius.l, style: .continuous).strokeBorder(Color.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.14), radius: 14, y: 6)
+    }
+}
+
 /// Re-lays out both panes at the interpolated width so the page follows the sidebar's edge.
 private struct SidebarSplit<SidebarContent: View>: ViewModifier, Animatable {
     nonisolated var width: CGFloat
@@ -291,11 +362,32 @@ private struct SidebarResizeHandle: View {
                     }
                     .onEnded { _ in startWidth = nil }
             )
-            .onTapGesture(count: 2) { width = Double(Size.sidebar) }
+            .onTapGesture(count: 2) { reset() }
+            .help("Drag to resize the sidebar; double-click to reset")
             .accessibilityElement()
             .accessibilityLabel("Resize sidebar")
+            .accessibilityValue("\(Int(clamped(width).rounded())) points")
+            .accessibilityHint("Swipe up or down to widen or narrow the sidebar")
+            // VoiceOver and keyboard users step the width without a mouse, as with Home's tiles.
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: width = clamped(width + Self.step)
+                case .decrement: width = clamped(width - Self.step)
+                @unknown default: break
+                }
+            }
+            .accessibilityAction(named: "Reset sidebar width") { reset() }
             .accessibilityIdentifier("sidebar.resize")
     }
+
+    /// How far one accessibility increment moves the edge.
+    private static let step: Double = 24
+
+    private func clamped(_ value: Double) -> Double {
+        min(max(value, Double(Size.sidebarMin)), Double(Size.sidebarMax))
+    }
+
+    private func reset() { width = Double(Size.sidebar) }
 }
 
 private struct Sidebar: View {

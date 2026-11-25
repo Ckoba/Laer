@@ -141,9 +141,16 @@ extension ReadResponse {
 }
 
 @Suite struct DateParsingTests {
-    @Test(arguments: ["2030-01-02T03:04:05Z", "2030-01-02T03:04:05.123Z", "2030-01-02T03:04:05"])
+    @Test(arguments: ["2030-01-02T03:04:05Z", "2030-01-02T03:04:05.123Z", "2030-01-02T03:04:05", "2030-01-02T03:04:05.123"])
     func acceptsObservedForms(_ text: String) {
         #expect(APIDate.parse(text) != nil)
+    }
+
+    @Test func zonelessTimestampsUseLocalTimeZoneWhileZStaysUTC() throws {
+        let cet = try #require(TimeZone(secondsFromGMT: 3600))
+        let localDate = try #require(APIDate.parse("2030-01-02T16:00:00", defaultTimeZone: cet))
+        let utcDate = try #require(APIDate.parse("2030-01-02T15:00:00Z", defaultTimeZone: cet))
+        #expect(localDate == utcDate)
     }
 
     @Test func rejectsPlainText() {

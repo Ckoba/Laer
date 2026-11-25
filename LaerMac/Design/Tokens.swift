@@ -2,7 +2,6 @@ import AppKit
 import SwiftUI
 
 // The only place in the app that holds colour, size, type and motion values.
-// docs/ui-reference.md lists the same values; change both together.
 
 enum Space {
     static let s2: CGFloat = 2
@@ -115,8 +114,9 @@ extension Color {
     static let disabledLabel = Color(nsColor: .tertiaryLabelColor)
     /// The chosen segment in a segmented control, clearly lifted off its track in both themes.
     static let segmentSelected = dynamic(light: 0xFFFFFF, dark: 0x4A4A4A)
-    /// A third text level, below `textMuted`: ended events, hints.
-    static let textFaint = dynamic(light: 0x9A9A9A, dark: 0x6E6E6E)
+    /// A third text level, below `textMuted`: ended events, hints. Keeps WCAG AA (4.5:1) on `stage`:
+    /// about 4.9:1 on white and 5.1:1 on the dark stage.
+    static let textFaint = dynamic(light: 0x707070, dark: 0x8A8A8A)
 
     /// One hue per course, picked by course id so it stays the same between launches.
     static func course(_ id: Int) -> Color { coursePalette[((id % coursePalette.count) + coursePalette.count) % coursePalette.count] }

@@ -1,4 +1,5 @@
 import AppKit
+import AuthenticationServices
 import Foundation
 import LaerCore
 import Observation
@@ -83,10 +84,15 @@ final class AppModel {
     var isResolvingSite = false
     /// The public institution list, read once when the picker shows, for suggestions as the person types.
     private(set) var siteList: [Site] = []
-    private var isLoadingSiteList = false
+    @ObservationIgnored private var directoryLoadTask: Task<[Site], Error>?
     private(set) var sessionNotice: String?
     /// The sign-in page couldn't load, usually because there's no connection.
     private(set) var signInLoadFailed = false
+    private(set) var usesWebsiteSignIn = false
+    private(set) var isSigningIn = false
+    private(set) var isEndingSession = false
+    private(set) var signInStatus: String?
+    var confirmsRemovingLocalData = false
 
     var selection: Selection? = .home
     /// The file showing in the right panel. Setting one adds its tab.
@@ -134,11 +140,44 @@ final class AppModel {
     @ObservationIgnored private var visibleLookups: (place: String, queue: [Resource]) = ("", [])
 
     static let fetchesAheadKey = "LaerFetchFilesAhead"
-    /// On unless turned off in Settings: links are found and readings saved before a click. Decision 0020.
-    var fetchesAhead: Bool { UserDefaults.standard.object(forKey: Self.fetchesAheadKey) as? Bool ?? true }
+    static let optionalFeaturesAskedKey = "LaerOptionalFeaturesAsked"
+    /// Off until turned on in onboarding or Settings: links are found and readings saved before a click.
+    var fetchesAhead: Bool { UserDefaults.standard.bool(forKey: Self.fetchesAheadKey) }
+    private(set) var hasSeenOptionalFeaturesPrompt: Bool = UserDefaults.standard.bool(forKey: AppModel.optionalFeaturesAskedKey)
+
+    /// Shown once as a non-invasive corner card after sign-in so optional features stay opt-in.
+    var shouldPromptOptionalFeatures: Bool {
+        guard case .ready = authState, !hasSeenOptionalFeaturesPrompt else { return false }
+        if ProcessInfo.processInfo.arguments.contains("-LaerUITestReset") { return false }
+        #if DEBUG
+        if fixtureRoot != nil || UserDefaults.standard.bool(forKey: "LaerFixtureMode") { return false }
+        #endif
+        return true
+    }
+
+    func setFetchesAhead(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: Self.fetchesAheadKey)
+        if !enabled {
+            stopFetchingAhead()
+        } else if case .ready = authState {
+            Task { await saveUpcomingReadings() }
+        }
+    }
+
+    func dismissOptionalFeaturesPrompt(fetchAhead: Bool, lectureBriefs: Bool) async {
+        hasSeenOptionalFeaturesPrompt = true
+        UserDefaults.standard.set(true, forKey: Self.optionalFeaturesAskedKey)
+        briefs.markAsked()
+        setFetchesAhead(fetchAhead)
+        if briefs.isAvailable {
+            await setOnDeviceBriefs(lectureBriefs)
+        }
+    }
     /// Links the person keeps on Home and in the menu bar, such as exam or mail sites. See `AppModel+Home`.
     var studyLinks: [StudyLink] = StudyLink.saved()
     var examPlan = ExamPlanState()
+    @ObservationIgnored var examPlanTask: Task<Void, Never>?
+    @ObservationIgnored var examPlanGeneration = 0
     var viewerIsFull = false
     var convertedFiles: [String: URL] = [:]
     /// Office files the person switched to their original view.
@@ -177,22 +216,32 @@ final class AppModel {
     private(set) var resourcesState: [String: CollectionState] = [:]
     private(set) var downloadStates: [String: DownloadState] = [:]
     private(set) var savedAssets: [String: LocalAsset] = [:]
+    @ObservationIgnored private var downloadTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var downloadsToKeep: Set<String> = []
 
     private(set) var snapshots: SnapshotStore?
     private(set) var downloads: DownloadStore?
     private let coordinator = RefreshCoordinator()
     private var recovery: SessionRecovery?
     private var generation = 0
-    private var isChecking = false
-    private var sessionGate: Task<Void, Never>?
-    private var oauthState: String?
+    private(set) var authGeneration = 0
+    private var isSwitchingAccount = false
+    private var isVerifyingStartup = false
+    @ObservationIgnored private var startupTask: Task<Void, Never>?
+    private var checkingGeneration: Int?
+    private var ephemeralRoot: URL?
+    private let oauthPresentation = OAuthPresentationContext()
+    @ObservationIgnored private var oauthSession: ASWebAuthenticationSession?
+    @ObservationIgnored private var fileSessionTask: Task<Void, Never>?
+    @ObservationIgnored private var refreshAllTask: Task<Void, Never>?
     private var bearer: BearerTransport?
     private var tokenBox: TokenBox?
     #if DEBUG
     private var fixtureFlag: FixtureFlag?
+    private var fixtureTransport: (any ReadTransport)?
     private var fixtureRoot: URL?
     #endif
-    private var didRefreshAfterVerify = false
+    private var websiteSessionVerified = false
     private var pollTask: Task<Void, Never>?
     private var startupSearchTask: Task<Void, Never>?
     private var backgroundRefreshTask: Task<Void, Never>?
@@ -217,6 +266,16 @@ final class AppModel {
             return
         }
         #endif
+        _ = Self.sweepTemporarySessionFolders()
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let root = self?.ephemeralRoot else { return }
+                try? Self.removeIfPresent(root)
+                self?.ephemeralRoot = nil
+            }
+        }
         // Tests start as a first run without touching the real saved institution.
         if defaults.bool(forKey: "LaerUITestReset") { return }
         if let data = defaults.data(forKey: Self.siteKey),
@@ -229,7 +288,11 @@ final class AppModel {
                 return StartupAccount(person: person, storage: storage, cache: cache)
             }
             let keychain = Self.readTokens(for: saved)
-            Task { await open(site: saved, startup: startup, keychainRead: keychain) }
+            startupTask = Task { [weak self] in
+                guard let self else { return }
+                await self.open(site: saved, startup: startup, keychainRead: keychain)
+                self.startupTask = nil
+            }
         } else if let preset = defaults.string(forKey: "LaerInstitution") {
             Task { await chooseSite(shortName: preset) }
         }
@@ -239,10 +302,15 @@ final class AppModel {
 
     /// Reads the public institution list for the picker. A failure leaves typing a short name working.
     func loadSiteList() async {
-        guard siteList.isEmpty, !isLoadingSiteList else { return }
-        isLoadingSiteList = true
-        defer { isLoadingSiteList = false }
-        if let sites = try? await SiteDirectory().allSites() { siteList = sites }
+        guard siteList.isEmpty else { return }
+        if let directoryLoadTask {
+            _ = try? await directoryLoadTask.value
+            return
+        }
+        let task = Task { try await SiteDirectory().allSites() }
+        directoryLoadTask = task
+        defer { directoryLoadTask = nil }
+        if let sites = try? await task.value { siteList = sites }
     }
 
     private func saveChosen(_ site: Site) {
@@ -296,77 +364,111 @@ final class AppModel {
     private func open(
         site: Site, startup: StartupAccount? = nil, keychainRead: Task<OAuthTokens?, Never>? = nil
     ) async {
+        let attempt = authGeneration
         self.site = site
-        let session = WebSession(site: site)
+        let session = makeWebSession(site: site)
         webSession = session
-        session.onNavigationFinished = { [weak self] in
-            Task { await self?.checkSession() }
-        }
-        recovery = SessionRecovery { [weak self] in
-            guard let self else { throw APIError.signedOut }
-            try await self.renewSession()
-        }
 
-        session.onLoadFailed = { [weak self] in self?.signInLoadFailed = true }
-        session.onOAuthRedirect = { [weak self] url in
-            Task { await self?.finishOAuth(redirect: url) }
-        }
-
-        // Saved content opens first, online or not. Requests wait for the token below.
+        // Show cached content during verification, but defer reads until the account is known.
+        isVerifyingStartup = true
         let keychain = keychainRead ?? Self.readTokens(for: site)
-        let gate = Task { [weak self] in
-            let tokens = await keychain.value
-            Perf.mark("tokens read")
-            guard let tokens, let self, self.webSession === session else { return }
-            self.useOAuth(tokens, site: site)
-        }
-        sessionGate = gate
-        if let person = startup?.person ?? Self.cachedPerson(.standard) {
-            await enter(person: person, site: site, startup: startup)
+        if let startup {
+            await enter(person: startup.person, site: site, startup: startup)
+            guard isCurrentAuth(attempt) else { return }
         }
         Perf.mark("saved content shown")
-        // The Keychain read blocks for a noticeable moment, so it stays off the main thread.
         let tokens = await keychain.value
-        // The gate installs the token before any waiting request continues.
-        await gate.value
-        guard webSession === session else { return }
-        sessionGate = nil
-        if tokens != nil {
-            await verifyOAuthSession(site: site)
-            return
-        }
-        resetAccountState()
-        authState = .signingIn
-        await startOAuthSignIn(site: site)
-    }
-
-    /// OAuth is the primary route. Anything that stops it falls back to the website session.
-    private func startOAuthSignIn(site: Site) async {
-        let state = UUID().uuidString
-        oauthState = state
-        authState = authState == .choosingSite ? .signingIn : authState
-        signInLoadFailed = false
-        guard let url = OAuthClient.authorizeURL(site: site, state: state) else {
-            await startWebsiteSession(site: site)
-            return
-        }
-        webSession?.webView.load(URLRequest(url: url))
-    }
-
-    private func finishOAuth(redirect: URL) async {
-        guard let site, let oauthState, let code = OAuthClient.code(fromRedirect: redirect, expectedState: oauthState) else {
-            if let site { await startWebsiteSession(site: site) }
-            return
-        }
-        self.oauthState = nil
-        do {
-            let tokens = try await OAuthTokenClient(baseURL: site.baseURL).exchange(code: code)
-            TokenVault(site: site).save(tokens)
+        guard isCurrentAuth(attempt) else { return }
+        Perf.mark("tokens read")
+        if let tokens {
             useOAuth(tokens, site: site)
-            await verifyOAuthSession(site: site)
-        } catch {
-            await startWebsiteSession(site: site)
+            await verifyOAuthSession(site: site, attempt: attempt)
+        } else {
+            isVerifyingStartup = false
+            resetAccountState()
+            authState = .signingIn
+            if keychainRead == nil, (NSApp.keyWindow ?? NSApp.mainWindow) != nil { beginSignIn() }
         }
+    }
+
+    private func makeWebSession(site: Site) -> WebSession {
+        let session = WebSession(site: site)
+        session.onNavigationFinished = { [weak self, weak session] in
+            guard let self, let session, self.webSession === session else { return }
+            Task { await self.checkSession() }
+        }
+        session.onLoadFailed = { [weak self, weak session] in
+            guard let self, let session, self.webSession === session, self.usesWebsiteSignIn else { return }
+            self.signInLoadFailed = true
+        }
+        return session
+    }
+
+    private func isCurrentAuth(_ attempt: Int) -> Bool {
+        attempt == authGeneration && !isEndingSession && !Task.isCancelled
+    }
+
+    private func startOAuthSignIn(site: Site, attempt: Int) {
+        let state = UUID().uuidString
+        guard let pkce = try? OAuthPKCE(), let url = OAuthClient.authorizeURL(site: site, state: state, pkce: pkce) else {
+            isSigningIn = false
+            signInStatus = "Couldn’t start sign-in. Try again."
+            return
+        }
+        let session = ASWebAuthenticationSession(url: url, callbackURLScheme: OAuthClient.redirectScheme) { [weak self] redirect, error in
+            let didCancel = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
+            Task { @MainActor [weak self] in
+                guard let self, self.isCurrentAuth(attempt) else { return }
+                defer {
+                    if self.authGeneration == attempt {
+                        self.oauthSession = nil
+                        self.isSigningIn = false
+                    }
+                }
+                guard let redirect else {
+                    if !didCancel { self.signInStatus = "Couldn’t open sign-in. Try again." }
+                    return
+                }
+                await self.finishOAuth(redirect: redirect, site: site, state: state, pkce: pkce, attempt: attempt)
+            }
+        }
+        session.presentationContextProvider = oauthPresentation
+        session.prefersEphemeralWebBrowserSession = false
+        oauthSession = session
+        if !session.start() {
+            oauthSession = nil
+            isSigningIn = false
+            signInStatus = "Couldn’t open sign-in. Try again."
+        }
+    }
+
+    private func finishOAuth(
+        redirect: URL, site: Site, state: String, pkce: OAuthPKCE, attempt: Int,
+        exchange: (String, String) async throws -> OAuthTokens,
+        save: (OAuthTokens) -> Bool
+    ) async {
+        guard isCurrentAuth(attempt) else { return }
+        do {
+            let code = try OAuthClient.parseCallback(redirect, expectedState: state)
+            let tokens = try await exchange(code, pkce.verifier)
+            guard isCurrentAuth(attempt) else { return }
+            if !save(tokens) {
+                signInStatus = "Laer couldn’t save your sign-in to the Keychain."
+                return
+            }
+            useOAuth(tokens, site: site)
+            await verifyOAuthSession(site: site, attempt: attempt)
+        } catch {
+            guard isCurrentAuth(attempt) else { return }
+            signInStatus = "Sign-in couldn’t be completed. Try again."
+        }
+    }
+
+    private func finishOAuth(redirect: URL, site: Site, state: String, pkce: OAuthPKCE, attempt: Int) async {
+        await finishOAuth(redirect: redirect, site: site, state: state, pkce: pkce, attempt: attempt,
+                          exchange: { code, verifier in
+            try await OAuthTokenClient(baseURL: site.baseURL).exchange(code: code, pkceVerifier: verifier)
+        }, save: { TokenVault(site: site).save($0) })
     }
 
     private func useOAuth(_ tokens: OAuthTokens, site: Site) {
@@ -375,146 +477,213 @@ final class AppModel {
         bearer = BearerTransport(baseURL: site.baseURL, box: box)
         let client = OAuthTokenClient(baseURL: site.baseURL)
         let vault = TokenVault(site: site)
-        recovery = SessionRecovery {
-            let log = Logger(subsystem: "app.laer.Laer", category: "session")
-            let current = await box.tokens
-            log.notice("refresh start, access token left \(Int(current.expiresAt.timeIntervalSinceNow))s")
-            do {
-                let renewed = try await client.refresh(current.refreshToken)
-                await box.update(renewed)
-                vault.save(renewed)
-                log.notice("refresh ok")
-            } catch {
-                log.notice("refresh failed: \(String(describing: error), privacy: .public)")
-                throw error
-            }
-        }
-    }
-
-    private func verifyOAuthSession(site: Site) async {
-        guard let bearer, let recovery else { return }
-        let client = ItslearningClient(transport: bearer)
-        if let box = tokenBox {
-            try? await recovery.renewIfNeeded { await box.tokens.expiresAt < Date().addingTimeInterval(15) }
-        }
         let log = Logger(subsystem: "app.laer.Laer", category: "session")
-        // With saved content on screen, the refresh runs alongside the identity check.
-        var refresh: Task<Void, Never>?
-        if case .ready = authState {
-            didRefreshAfterVerify = true
-            refresh = Task { await refreshAll() }
-        }
-        do {
-            let person = try await recovery.withRecovery { try await client.person() }
-            log.notice("verify ok")
-            sessionNotice = nil
-            // Saved content already belongs to this person, so nothing needs loading twice.
-            if case .ready(let current) = authState, current.personId == person.personId {} else {
-                refresh?.cancel()
-                refresh = nil
-                await enter(person: person, site: site)
-            }
-            if let webSession {
-                Task(priority: .utility) {
-                    let revision = webSession.fileSessionRevision
-                    await webSession.prepareFileSession(client: client)
-                    if revision == webSession.fileSessionRevision { FileAcquirer.prepareResolver(for: webSession) }
+        recovery = SessionRecovery(refresh: {
+            try await client.refresh(box.tokens.refreshToken)
+        }, persist: { [weak self] renewed in
+            // Keep rotated tokens in memory even if the Keychain write fails, so the active
+            // session is not broken by a transient Keychain error; still surface the failure.
+            if !vault.save(renewed) {
+                log.error("token renewal keychain save failed")
+                Task { @MainActor [weak self] in
+                    self?.sessionNotice = "Laer couldn’t save your renewed sign-in to the Keychain."
                 }
             }
-            if refresh == nil {
-                didRefreshAfterVerify = true
-                await refreshAll()
-            } else {
-                await refresh?.value
+        }, install: { renewed in
+            await box.update(renewed)
+        })
+    }
+
+    private func verifyOAuthSession(site: Site, attempt: Int) async {
+        guard isCurrentAuth(attempt), let bearer, let recovery else { return }
+        defer { if authGeneration == attempt { isVerifyingStartup = false } }
+        let client = ItslearningClient(transport: bearer)
+        let log = Logger(subsystem: "app.laer.Laer", category: "session")
+        do {
+            if let box = tokenBox {
+                try await recovery.renewIfNeeded { await box.tokens.expiresAt < Date().addingTimeInterval(15) }
+                guard isCurrentAuth(attempt) else { return }
             }
+            let person = try await recovery.withRecovery { try await client.person() }
+            guard isCurrentAuth(attempt) else { return }
+            guard person.personId > 0 else { throw APIError.signedOut }
+            sessionNotice = nil
+            await installVerifiedIdentity(person, site: site)
+            guard isCurrentAuth(attempt) else { return }
+            isVerifyingStartup = false
+            if let webSession {
+                fileSessionTask = Task(priority: .utility) { [weak self] in
+                    guard self?.isCurrentAuth(attempt) == true else { return }
+                    let revision = webSession.fileSessionRevision
+                    await webSession.prepareFileSession(client: client)
+                    guard self?.isCurrentAuth(attempt) == true, self?.webSession === webSession,
+                          revision == webSession.fileSessionRevision else { return }
+                    FileAcquirer.prepareResolver(for: webSession)
+                }
+            }
+            await refreshAll()
+            guard isCurrentAuth(attempt) else { return }
             #if DEBUG
-            if UserDefaults.standard.bool(forKey: "LaerRunProbe") {
-                await RouteProbe(session: webSession!).runShapes(transport: bearer)
+            if UserDefaults.standard.bool(forKey: "LaerRunProbe"), let webSession {
+                UserDefaults.standard.removeObject(forKey: "LaerVaultRestored")
+                await RouteProbe(session: webSession).runShapes(transport: bearer)
             }
             #endif
         } catch APIError.signedOut {
+            guard isCurrentAuth(attempt) else { return }
+            await recovery.invalidateAll()
+            guard isCurrentAuth(attempt) else { return }
             log.notice("verify rejected")
             webSession?.invalidateFileSession()
-            TokenVault(site: site).clear()
+            let cleared = TokenVault(site: site).clear()
             tokenBox = nil
             self.bearer = nil
+            self.recovery = nil
+            let notice = cleared ? "Your session has ended." : "Laer couldn’t remove the saved sign-in from the Keychain."
             if case .ready = authState {
-                sessionNotice = "Your session has ended."
+                sessionNotice = notice
             } else {
-                await startOAuthSignIn(site: site)
+                authState = .signingIn
+                signInStatus = notice
             }
         } catch {
-            log.notice("verify failed: \(String(describing: error), privacy: .public)")
-            // Offline or a service problem. Saved content stays and nothing is signed out.
-            if case .ready = authState {} else { await startOAuthSignIn(site: site) }
+            guard isCurrentAuth(attempt) else { return }
+            log.notice("verify failed: \(String(describing: type(of: error)), privacy: .public)")
+            if case .ready = authState {
+                // Keep the ready state when a background verification hits a transient error.
+            } else {
+                authState = .signingIn
+                signInStatus = "Laer couldn’t verify your sign-in. Try again."
+            }
         }
     }
 
-    /// The fallback: the website's own session in the app's web view.
-    private func startWebsiteSession(site: Site) async {
-        guard let session = webSession else { return }
-        oauthState = nil
+    func beginWebsiteSignIn() {
+        guard let site, !isEndingSession else { return }
+        let attempt = startSignInAttempt(website: true)
+        let previousRecovery = recovery
+        Task {
+            await previousRecovery?.invalidateAll()
+            guard isCurrentAuth(attempt) else { return }
+            recovery = nil
+            await startWebsiteSession(site: site, attempt: attempt)
+        }
+    }
+
+    /// The fallback uses only the app's own website session.
+    private func startWebsiteSession(site: Site, attempt: Int) async {
+        tokenBox = nil
+        bearer = nil
+        let session = makeWebSession(site: site)
+        webSession = session
         recovery = SessionRecovery { [weak self] in
             guard let self else { throw APIError.signedOut }
             try await self.renewSession()
         }
         let restored = await SessionVault(site: site).restore(into: session.cookieStore)
+        guard isCurrentAuth(attempt) else { return }
+        #if DEBUG
         UserDefaults.standard.set(restored > 0, forKey: "LaerVaultRestored")
+        #else
+        _ = restored
+        #endif
         await session.loadSiteAndWait()
+        guard isCurrentAuth(attempt) else { return }
         await checkSession()
-        if case .ready = authState, !didRefreshAfterVerify {
-            sessionNotice = "Your session has ended."
-        }
     }
 
-    /// A valid identity response is the only signal of being signed in. A course count is not.
+    /// First try the identity route. The website may accept course reads while rejecting identity.
     private func checkSession() async {
-        guard oauthState == nil, bearer == nil else { return }
-        guard let session = webSession, let site, session.isOnSiteOrigin, !isChecking else { return }
-        isChecking = true
-        defer { isChecking = false }
-        guard await Self.hasValidSession(session) else { return }
-        sessionNotice = nil
-        await SessionVault(site: site).save(from: session.cookieStore)
-        if case .ready = authState {} else {
-            await enter(person: Person(personId: 0), site: site)
+        let attempt = authGeneration
+        guard isCurrentAuth(attempt), usesWebsiteSignIn, bearer == nil, !websiteSessionVerified,
+              let session = webSession, let site, session.isOnSiteOrigin, checkingGeneration != attempt else { return }
+        checkingGeneration = attempt
+        defer { if checkingGeneration == attempt { checkingGeneration = nil } }
+        let client = ItslearningClient(transport: WebKitTransport(session: session))
+        let identity = try? await client.person()
+        guard isCurrentAuth(attempt), session.isOnSiteOrigin else { return }
+        let person: Person
+        if let identity, identity.personId > 0 {
+            person = identity
+        } else {
+            guard await Self.hasValidSession(session), isCurrentAuth(attempt), session.isOnSiteOrigin else { return }
+            person = Person(personId: 0)
         }
-        guard !didRefreshAfterVerify else { return }
-        didRefreshAfterVerify = true
+        let saved = await SessionVault(site: site).save(from: session.cookieStore) {
+            self.isCurrentAuth(attempt)
+        }
+        guard isCurrentAuth(attempt) else { return }
+        signInStatus = nil
+        sessionNotice = saved ? nil : "Laer couldn’t save your website session to the Keychain."
+        await enter(person: person, site: site)
+        guard isCurrentAuth(attempt) else { return }
+        session.noteFileSession(ifCurrent: session.fileSessionRevision)
+        websiteSessionVerified = true
         await refreshAll()
         #if DEBUG
-        if UserDefaults.standard.bool(forKey: "LaerRunProbe") {
+        if isCurrentAuth(attempt), UserDefaults.standard.bool(forKey: "LaerRunProbe") {
             await RouteProbe(session: session).run()
         }
         #endif
     }
 
-    /// Reloads the site once. Any further need to sign in goes to the user, never to an automatic loop.
+    /// Reloads the site once. Any further need to sign in goes to the user.
     private func renewSession() async throws {
-        guard let session = webSession else { throw APIError.signedOut }
+        guard usesWebsiteSignIn, let session = webSession else { throw APIError.signedOut }
+        let attempt = authGeneration
         await session.loadSiteAndWait()
-        guard session.isOnSiteOrigin, await Self.hasValidSession(session) else {
-            throw APIError.signedOut
-        }
+        guard isCurrentAuth(attempt), session.isOnSiteOrigin, await Self.hasValidSession(session),
+              isCurrentAuth(attempt) else { throw APIError.signedOut }
     }
 
     private static func hasValidSession(_ session: WebSession) async -> Bool {
         (try? await ItslearningClient(transport: WebKitTransport(session: session)).sessionIsValid()) == true
     }
 
-    private func enter(person: Person, site: Site, startup: StartupAccount? = nil) async {
-        // Never show one account's data to another.
-        if case .ready(let current) = authState, current.personId != person.personId {
-            resetAccountState()
+    private func installVerifiedIdentity(_ person: Person, site: Site) async {
+        if case .ready(let current) = authState, current.personId == person.personId {
+            authState = .ready(person)
+        } else {
+            await enter(person: person, site: site)
         }
-        loadRecentFiles(personId: person.personId)
-        let persistentRoot = Self.storageRoot()
-        var root = persistentRoot
-        #if DEBUG
-        if let fixtureRoot { root = fixtureRoot }
-        #endif
-        if root == persistentRoot, let data = try? JSONEncoder().encode(person) {
-            UserDefaults.standard.set(data, forKey: Self.personKey)
+    }
+
+    private func enter(person: Person, site: Site, startup: StartupAccount? = nil) async {
+        let attempt = authGeneration
+        if let oldStore = snapshots, startup?.storage.snapshots !== oldStore {
+            isSwitchingAccount = true
+            authState = .launching
+            cancelAccountWork()
+            let nextGeneration = await coordinator.invalidateAll()
+            guard isCurrentAuth(attempt) else { return }
+            generation = nextGeneration
+            if let ephemeralRoot {
+                await wipeAccount(snapshots: oldStore, downloads: downloads, briefs: briefs.store)
+                guard isCurrentAuth(attempt) else { return }
+                try? Self.removeIfPresent(ephemeralRoot)
+                self.ephemeralRoot = nil
+            } else {
+                try? await oldStore.retire()
+                guard isCurrentAuth(attempt) else { return }
+            }
+            resetAccountState()
+            isSwitchingAccount = false
+        }
+        let root: URL
+        if person.personId == 0 {
+            root = FileManager.default.temporaryDirectory.appending(path: "LaerEphemeral-\(UUID().uuidString)")
+            ephemeralRoot = root
+            if localDataRoot == Self.storageRoot() { UserDefaults.standard.removeObject(forKey: Self.personKey) }
+        } else {
+            root = localDataRoot
+            #if DEBUG
+            if fixtureRoot == nil { loadRecentFiles(personId: person.personId) }
+            #else
+            loadRecentFiles(personId: person.personId)
+            #endif
+            if root == Self.storageRoot(), let data = try? JSONEncoder().encode(person) {
+                UserDefaults.standard.set(data, forKey: Self.personKey)
+            }
         }
         let accountKey = "\(site.customerId)-\(person.personId)"
         let storage = startup?.storage ?? AccountStorage(root: root, accountKey: accountKey)
@@ -524,7 +693,7 @@ final class AppModel {
         async let openBriefs: Void = briefs.open(root: root, accountKey: accountKey)
         let cache = if let startup { await startup.cache.value } else { await storage.loadCache() }
         await openBriefs
-        guard store === downloads else { return }
+        guard isCurrentAuth(attempt), store === downloads else { return }
         applyCachedAccountData(cache)
         for asset in cache.assets where !asset.id.hasPrefix(Self.messageAttachmentPrefix) {
             savedAssets[asset.id] = asset
@@ -542,8 +711,7 @@ final class AppModel {
     }
 
     func retrySignInPage() {
-        guard let site else { return }
-        Task { await startOAuthSignIn(site: site) }
+        if usesWebsiteSignIn { beginWebsiteSignIn() } else { beginSignIn() }
     }
 
     func closeViewer() {
@@ -565,59 +733,217 @@ final class AppModel {
     }
 
     func beginSignIn() {
-        sessionNotice = nil
+        guard !isEndingSession else { return }
         #if DEBUG
         if let fixtureFlag {
+            authGeneration += 1
+            sessionNotice = nil
             fixtureFlag.isSignedOut = false
             Task { await refreshAll() }
             return
         }
         #endif
-        AvatarLoader.shared.reset()
-        webSession?.invalidateFileSession()
-        didRefreshAfterVerify = false
-        authState = .signingIn
-        if let site { Task { await startOAuthSignIn(site: site) } }
+        guard let site else { return }
+        let attempt = startSignInAttempt(website: false)
+        let previousRecovery = recovery
+        Task {
+            await previousRecovery?.invalidateAll()
+            guard isCurrentAuth(attempt) else { return }
+            recovery = nil
+            webSession = makeWebSession(site: site)
+            startOAuthSignIn(site: site, attempt: attempt)
+        }
     }
 
-    /// Ends the session and hides account data. Saved files stay on disk until removed explicitly.
-    func signOut() async {
-        generation += 1
-        await coordinator.invalidate(generation: generation)
-        pollTask?.cancel()
-        forgetRecentFiles()
-        resetAccountState()
-        UserDefaults.standard.removeObject(forKey: Self.personKey)
-        if let site {
-            SessionVault(site: site).clear()
-            TokenVault(site: site).clear()
-        }
+    private func startSignInAttempt(website: Bool) -> Int {
+        authGeneration += 1
+        oauthSession?.cancel()
+        oauthSession = nil
         bearer = nil
         tokenBox = nil
-        ViewerFiles.removeDerivedFiles()
-        await webSession?.clearWebsiteData()
+        sessionNotice = nil
+        signInStatus = nil
+        signInLoadFailed = false
+        isVerifyingStartup = false
+        websiteSessionVerified = false
+        isSwitchingAccount = false
+        usesWebsiteSignIn = website
+        isSigningIn = !website
+        AvatarLoader.shared.reset()
+        webSession?.invalidateFileSession()
+        webSession = nil
+        cancelAccountWork()
         authState = .signingIn
-        if let site { await startOAuthSignIn(site: site) }
+        return authGeneration
+    }
+
+    /// Ends the session. The destructive option also removes local data for every account.
+    func signOut(removeLocalData: Bool = false) async {
+        guard !isEndingSession else { return }
+        authGeneration += 1
+        isEndingSession = true
+        defer { isEndingSession = false }
+        oauthSession?.cancel()
+        oauthSession = nil
+        startupTask?.cancel()
+        isSigningIn = false
+        usesWebsiteSignIn = false
+        confirmsRemovingLocalData = false
+        isVerifyingStartup = false
+        websiteSessionVerified = false
+        isSwitchingAccount = false
+        authState = .launching
+        let oldRecovery = recovery
+        let oldSession = webSession
+        let oldSnapshots = snapshots
+        let oldDownloads = downloads
+        let oldBriefs = briefs.store
+        let temporary = ephemeralRoot
+        ephemeralRoot = nil
+        recovery = nil
+        webSession = nil
+        bearer = nil
+        tokenBox = nil
+        let testSession: Bool
+        #if DEBUG
+        testSession = fixtureRoot != nil
+        #else
+        testSession = false
+        #endif
+        if !testSession { forgetRecentFiles() }
+        resetAccountState()
+        await oldRecovery?.invalidateAll()
+        generation = await coordinator.invalidateAll()
+
+        var removedCredentials = true
+        if !testSession {
+            UserDefaults.standard.removeObject(forKey: Self.personKey)
+            if let site {
+                let clearedSession = SessionVault(site: site).clear()
+                let clearedToken = TokenVault(site: site).clear()
+                removedCredentials = clearedSession && clearedToken
+            }
+            ViewerFiles.removeDerivedFiles()
+            await oldSession?.clearWebsiteData()
+            await WebSession.clearLegacyWebsiteData()
+        }
+
+        var removedFiles = true
+        if removeLocalData || temporary != nil {
+            removedFiles = await wipeAccount(snapshots: oldSnapshots, downloads: oldDownloads, briefs: oldBriefs)
+        } else {
+            do { try await oldSnapshots?.retire() } catch { removedFiles = false }
+        }
+        if let temporary {
+            do { try Self.removeIfPresent(temporary) } catch { removedFiles = false }
+        }
+        if removeLocalData {
+            do { try Self.removeIfPresent(localDataRoot.appending(path: "Accounts")) } catch { removedFiles = false }
+            do { try Self.removeIfPresent(localDataRoot.appending(path: "ExamPlan.pdf")) } catch { removedFiles = false }
+            if !Self.sweepTemporarySessionFolders() { removedFiles = false }
+            if !testSession {
+                URLCache.shared.removeAllCachedResponses()
+                for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("recentFiles-") {
+                    UserDefaults.standard.removeObject(forKey: key)
+                }
+                examPlanAddress = nil
+            }
+        }
+        signInLoadFailed = false
+        if !removedCredentials || !removedFiles {
+            Logger(subsystem: "app.laer.Laer", category: "session").error("sign-out cleanup failed")
+        }
+        if !removedCredentials && !removedFiles {
+            signInStatus = "Laer couldn’t remove all saved credentials and local data."
+        } else if !removedCredentials {
+            signInStatus = "Laer couldn’t remove the saved sign-in from the Keychain."
+        } else if !removedFiles {
+            signInStatus = "Laer couldn’t finish cleaning up your local data."
+        } else {
+            signInStatus = nil
+        }
+        authState = site == nil ? .choosingSite : .signingIn
     }
 
     func changeInstitution() async {
+        guard !isEndingSession else { return }
         await signOut()
+        guard signInStatus == nil else { return }
         UserDefaults.standard.removeObject(forKey: Self.siteKey)
         webSession = nil
         site = nil
         authState = .choosingSite
     }
 
-    private func resetAccountState() {
-        AvatarLoader.shared.reset()
-        webSession?.invalidateFileSession()
-        cancelLinkLookups()
+    @discardableResult
+    private func wipeAccount(snapshots: SnapshotStore?, downloads: DownloadStore?, briefs: GeneratedBriefStore?) async -> Bool {
+        var removed = true
+        do { try await snapshots?.removeAllMetadata(retire: true) } catch { removed = false }
+        do { try await downloads?.removeAllDownloadedFiles(retire: true) } catch { removed = false }
+        do { try await briefs?.removeAll() } catch { removed = false }
+        return removed
+    }
+
+    var hasVerifiedIdentity: Bool {
+        if case .ready(let person) = authState { return person.personId > 0 }
+        return false
+    }
+
+    private static func removeIfPresent(_ url: URL) throws {
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
+    @discardableResult
+    static func sweepTemporarySessionFolders(in directory: URL = FileManager.default.temporaryDirectory) -> Bool {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil, options: [.skipsSubdirectoryDescendants]
+        ) else { return true }
+        var removedAll = true
+        for entry in entries {
+            let name = entry.lastPathComponent
+            if name.hasPrefix("LaerEphemeral-") || name.hasPrefix("LaerOffice-") {
+                do { try FileManager.default.removeItem(at: entry) } catch { removedAll = false }
+            }
+        }
+        return removedAll
+    }
+
+    var localDataRoot: URL {
+        #if DEBUG
+        if let fixtureRoot { return fixtureRoot }
+        #endif
+        return Self.storageRoot()
+    }
+
+    var examPlanRoot: URL { ephemeralRoot ?? localDataRoot }
+
+    private func cancelAccountWork() {
+        fileSessionTask?.cancel()
+        fileSessionTask = nil
+        pollTask?.cancel()
+        pollTask = nil
+        refreshAllTask?.cancel()
+        refreshAllTask = nil
+        stopFetchingAhead()
+        cancelExamPlan()
         pointedResource = nil
         OfficePDFConverter.cancelConversions()
         backgroundRefreshTask?.cancel()
         backgroundRefreshTask = nil
         startupSearchTask?.cancel()
         startupSearchTask = nil
+        searchDocumentWorker?.cancel()
+        searchOCRBatch?.cancel()
+        for task in downloadTasks.values { task.cancel() }
+    }
+
+    private func resetAccountState() {
+        cancelAccountWork()
+        AvatarLoader.shared.reset()
+        webSession?.invalidateFileSession()
+        examPlan = ExamPlanState()
         courses = []
         coursesState = CollectionState()
         updates = [:]
@@ -631,6 +957,8 @@ final class AppModel {
         tasksState = CollectionState()
         resources = [:]
         resourcesState = [:]
+        downloadTasks = [:]
+        downloadsToKeep = []
         downloadStates = [:]
         savedAssets = [:]
         selection = .home
@@ -647,8 +975,6 @@ final class AppModel {
         searchCoverageIncomplete = true
         searchRevision = 0
         isIndexing = false
-        searchDocumentWorker?.cancel()
-        searchOCRBatch?.cancel()
         searchDocumentWorker = nil
         searchDocumentQueue = [:]
         searchOCRBatch = nil
@@ -667,12 +993,13 @@ final class AppModel {
 
     private func makeClient() -> ItslearningClient? {
         #if DEBUG
+        if let fixtureTransport { return ItslearningClient(transport: fixtureTransport) }
         if let fixtureFlag {
             return ItslearningClient(transport: FixtureTransport(isSignedOut: { fixtureFlag.isSignedOut }))
         }
         #endif
         if let bearer { return ItslearningClient(transport: bearer) }
-        guard let session = webSession else { return nil }
+        guard usesWebsiteSignIn, let session = webSession else { return nil }
         return ItslearningClient(transport: WebKitTransport(session: session))
     }
 
@@ -680,7 +1007,9 @@ final class AppModel {
     /// host. Any other host, or no OAuth session, gets nil. Never put it in a URL or a log.
     func avatarAuthorization(for url: URL) async -> String? {
         guard let box = tokenBox, let origin = site?.baseURL, AvatarSession.sameOrigin(url, origin) else { return nil }
-        return "Bearer \(await box.tokens.accessToken)"
+        let tokens = await box.tokens
+        guard tokenBox === box, !Task.isCancelled else { return nil }
+        return "Bearer \(tokens.accessToken)"
     }
 
     func absoluteURL(_ string: String?) -> URL? {
@@ -701,6 +1030,7 @@ final class AppModel {
         if let snapshot = cache.tasks {
             tasks = snapshot.records
             tasksState.lastSuccess = snapshot.lastSuccess
+            tasksState.isIncomplete = snapshot.coverage == .incomplete
         }
         if let snapshot = cache.starred {
             starredIds = Set(snapshot.records.map(\.value))
@@ -708,32 +1038,52 @@ final class AppModel {
     }
 
     func refreshAll() async {
+        guard case .ready = authState, !isVerifyingStartup, !Task.isCancelled else { return }
+        if let refreshAllTask {
+            await refreshAllTask.value
+            return
+        }
+        let session = CollectionSession(self)
+        let task = Task { await runRefreshAll(session: session) }
+        refreshAllTask = task
+        await task.value
+        if refreshAllTask == task { refreshAllTask = nil }
+    }
+
+    private func runRefreshAll(session: CollectionSession) async {
         async let courses: Void = refreshCourses()
         async let tasks: Void = refreshTasks()
         async let starred: Void = refreshStarred()
         async let unread: Void = refreshUnreadThreadCount()
         _ = await (courses, tasks, starred, unread)
+        guard session.isCurrent(self) else { return }
         Perf.mark("refresh done")
         if case .course(let id) = selection {
             await refreshUpdates(courseId: id)
         }
-        backgroundRefreshTask?.cancel()
+        guard session.isCurrent(self), backgroundRefreshTask == nil else { return }
         backgroundRefreshTask = Task(priority: .utility) { [weak self] in
-            guard let self else { return }
+            guard let self, session.isCurrent(self) else { return }
+            defer { if session.matches(self) { backgroundRefreshTask = nil } }
             await prefetchActiveCourses()
+            guard session.isCurrent(self) else { return }
             // Saving readings can take minutes; briefs and the search index don't wait for it.
             async let readings: Void = saveUpcomingReadings()
             scheduleBriefsForUpcoming()
             await startupSearchTask?.value
+            guard session.isCurrent(self) else { return }
             await refreshSearchIndexIfStale()
             await readings
         }
     }
 
     func refreshIfStale() async {
-        guard case .ready = authState else { return }
+        guard case .ready = authState, !isVerifyingStartup else { return }
+        let session = CollectionSession(self)
         if isStale(coursesState) { await refreshCourses() }
+        guard session.isCurrent(self) else { return }
         if isStale(tasksState) { await refreshTasks() }
+        guard session.isCurrent(self) else { return }
         if case .course(let id) = selection, isStale(updatesState[id] ?? CollectionState()) {
             await refreshUpdates(courseId: id)
         }
@@ -759,15 +1109,23 @@ final class AppModel {
 
     /// Runs one read through coalescing, retry and session recovery, committing only on full success.
     func fetch<T: Sendable>(key: String, _ work: @escaping @Sendable (ItslearningClient) async throws -> T) async throws -> T {
-        await sessionGate?.value
-        guard let client = makeClient(), let recovery else { throw APIError.signedOut }
+        let session = CollectionSession(self)
+        if isVerifyingStartup { await startupTask?.value }
+        guard session.isCurrent(self), !isEndingSession, !isSwitchingAccount, !isVerifyingStartup else { throw CancellationError() }
+        guard case .ready = authState, let client = makeClient(), let recovery else { throw APIError.signedOut }
         let box = tokenBox
-        return try await coordinator.run(key: key, generation: generation) {
+        let result = try await coordinator.run(key: key, generation: generation) {
             if let box {
-                try? await recovery.renewIfNeeded { await box.tokens.expiresAt < Date().addingTimeInterval(15) }
+                do {
+                    try await recovery.renewIfNeeded { await box.tokens.expiresAt < Date().addingTimeInterval(15) }
+                } catch {
+                    try Task.checkCancellation()
+                }
             }
             return try await recovery.withRecovery { try await work(client) }
         }
+        guard session.isCurrent(self) else { throw CancellationError() }
+        return result
     }
 
     /// One user action, one attempt. Writes skip coalescing, retry and replay, and need the OAuth route.
@@ -802,49 +1160,61 @@ final class AppModel {
     }
 
     func refreshCourses() async {
-        let store = snapshots
+        let session = CollectionSession(self)
+        guard case .ready = authState, coursesState.phase != .loading, !Task.isCancelled else { return }
         coursesState.phase = .loading
+        defer { if session.matches(self), coursesState.phase == .loading { coursesState.phase = .idle } }
         do {
             let result = try await fetch(key: "courses") { try await $0.allCourses() }
-            let now = Date()
+            guard let state = await savePage(result, key: "courses", session: session) else { return }
             courses = result.items
-            try? await snapshots?.save(result.items, collection: "courses", coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
-            coursesState = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
-            await indexSearchGroup("courses", hits: result.items.map(Self.courseSearchHit), complete: result.isComplete, store: store)
-            if result.isComplete { await retainSearchCourses(Set(result.items.map(\.courseId)), store: store) }
-        } catch is CancellationError {
-            coursesState.phase = .idle
-        } catch RefreshError.staleGeneration {
-            coursesState.phase = .idle
+            coursesState = state
+            await indexSearchGroup("courses", hits: result.items.map(Self.courseSearchHit), complete: result.isComplete, store: session.store)
+            if result.isComplete, session.isCurrent(self) {
+                await retainSearchCourses(Set(result.items.map(\.courseId)), store: session.store)
+            }
         } catch {
-            coursesState.phase = .failed(message(for: error))
+            if let message = refreshFailure(error, session: session) { coursesState.phase = .failed(message) }
         }
     }
 
     func refreshTasks() async {
-        let store = snapshots
+        let session = CollectionSession(self)
+        guard case .ready = authState, tasksState.phase != .loading, !Task.isCancelled else { return }
         tasksState.phase = .loading
+        defer { if session.matches(self), tasksState.phase == .loading { tasksState.phase = .idle } }
         do {
             let result = try await fetch(key: "tasks") { try await $0.tasks() }
-            let now = Date()
+            guard let state = await savePage(result, key: "tasks", session: session) else { return }
             tasks = result.items
-            try? await snapshots?.save(result.items, collection: "tasks", coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
-            tasksState = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
-            await indexSearchGroup("tasks", hits: result.items.map(Self.taskSearchHit), complete: result.isComplete, store: store)
-        } catch RefreshError.staleGeneration {
-            tasksState.phase = .idle
+            tasksState = state
+            await indexSearchGroup("tasks", hits: result.items.map(Self.taskSearchHit), complete: result.isComplete, store: session.store)
         } catch {
-            tasksState.phase = .failed(message(for: error))
+            if let message = refreshFailure(error, session: session) { tasksState.phase = .failed(message) }
         }
+    }
+
+    private func savePage<Record: Codable & Sendable>(
+        _ result: PagedResult<Record>, key: String, session: CollectionSession
+    ) async -> CollectionState? {
+        guard session.isCurrent(self), let store = session.store else { return nil }
+        let now = Date()
+        let saved = try? await store.savePage(result, collection: key, at: now)
+        guard session.isCurrent(self), saved != false else { return nil }
+        return CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
+    }
+
+    private func refreshFailure(_ error: Error, session: CollectionSession) -> String? {
+        guard session.isCurrent(self), !(error is CancellationError),
+              (error as? RefreshError) != .staleGeneration else { return nil }
+        return message(for: error)
     }
 
     func refreshUnreadThreadCount() async {
         guard ParityGate.messages, case .ready = authState else { return }
-        let session = authState
-        let store = snapshots
-        let account = generation
+        let session = CollectionSession(self)
         if let count = try? await fetch(key: "unread-thread-count", { try await $0.unreadThreadCount() }),
-           !Task.isCancelled, account == generation, session == authState, store === snapshots {
+           session.isCurrent(self) {
             unreadThreadCount = count
         }
     }
@@ -854,57 +1224,70 @@ final class AppModel {
     }
 
     func loadUpdates(courseId: Int) async {
+        let session = CollectionSession(self)
         if updates[courseId] == nil,
-           let snapshot = await snapshots?.load(CourseUpdate.self, collection: "updates-\(courseId)") {
-            updates[courseId] = snapshot.records
-            updatesState[courseId, default: CollectionState()].lastSuccess = snapshot.lastSuccess
+           let snapshot = await session.store?.load(CourseUpdate.self, collection: "updates-\(courseId)") {
+            guard session.isCurrent(self) else { return }
+            if updates[courseId] == nil {
+                updates[courseId] = snapshot.records
+                updatesState[courseId, default: CollectionState()].lastSuccess = snapshot.lastSuccess
+            }
         }
-        if isStale(updatesState[courseId] ?? CollectionState()) {
-            await refreshUpdates(courseId: courseId)
-        }
+        guard session.isCurrent(self), isStale(updatesState[courseId] ?? CollectionState()) else { return }
+        await refreshUpdates(courseId: courseId)
     }
 
     func refreshUpdates(courseId: Int) async {
+        let session = CollectionSession(self)
+        guard case .ready = authState, updatesState[courseId]?.phase != .loading, !Task.isCancelled else { return }
         updatesState[courseId, default: CollectionState()].phase = .loading
+        defer {
+            if session.matches(self), updatesState[courseId]?.phase == .loading { updatesState[courseId]?.phase = .idle }
+        }
+        let key = "updates-\(courseId)"
         do {
-            let result = try await fetch(key: "updates-\(courseId)") { try await $0.updates(courseId: courseId) }
+            let result = try await fetch(key: key) { try await $0.updates(courseId: courseId) }
+            guard session.isCurrent(self) else { return }
             let now = Date()
             // A recent window: merge by source ID and never treat absence as deletion.
             var merged = Dictionary((updates[courseId] ?? []).map { ($0.notificationId, $0) }) { first, _ in first }
             result.forEach { merged[$0.notificationId] = $0 }
             let sorted = merged.values.sorted { ($0.published ?? .distantPast) > ($1.published ?? .distantPast) }
+            try? await session.store?.save(sorted, collection: key, coverage: .recentWindow, checkpoint: nil, at: now)
+            guard session.isCurrent(self) else { return }
             updates[courseId] = sorted
-            try? await snapshots?.save(sorted, collection: "updates-\(courseId)", coverage: .recentWindow, checkpoint: nil, at: now)
             updatesState[courseId] = CollectionState(phase: .idle, lastSuccess: now)
-        } catch RefreshError.staleGeneration {
-            updatesState[courseId, default: CollectionState()].phase = .idle
         } catch {
-            updatesState[courseId, default: CollectionState()].phase = .failed(message(for: error))
+            if let message = refreshFailure(error, session: session) { updatesState[courseId]?.phase = .failed(message) }
         }
     }
 
     func loadPlans(courseId: Int) async {
-        let store = snapshots
+        let session = CollectionSession(self)
+        let key = "plans-\(courseId)"
         Perf.mark("plans requested")
         defer { Perf.mark("plans ready") }
-        if plans[courseId] == nil,
-           let snapshot = await snapshots?.load(PlanPreview.self, collection: "plans-\(courseId)") {
-            plans[courseId] = snapshot.records
-            plansState[courseId, default: CollectionState()].lastSuccess = snapshot.lastSuccess
+        if plans[courseId] == nil, let snapshot = await session.store?.load(PlanPreview.self, collection: key) {
+            guard session.isCurrent(self) else { return }
+            if plans[courseId] == nil, plansState[courseId]?.phase != .loading {
+                plans[courseId] = snapshot.records
+                plansState[courseId] = CollectionState(lastSuccess: snapshot.lastSuccess, isIncomplete: snapshot.coverage == .incomplete)
+            }
         }
-        guard isStale(plansState[courseId] ?? CollectionState()) else { return }
+        guard session.isCurrent(self), case .ready = authState, plansState[courseId]?.phase != .loading,
+              isStale(plansState[courseId] ?? CollectionState()) else { return }
         plansState[courseId, default: CollectionState()].phase = .loading
+        defer {
+            if session.matches(self), plansState[courseId]?.phase == .loading { plansState[courseId]?.phase = .idle }
+        }
         do {
-            let result = try await fetch(key: "plans-\(courseId)") { try await $0.plans(courseId: courseId) }
-            let now = Date()
+            let result = try await fetch(key: key) { try await $0.plans(courseId: courseId) }
+            guard let state = await savePage(result, key: key, session: session) else { return }
             plans[courseId] = result.items
-            try? await snapshots?.save(result.items, collection: "plans-\(courseId)", coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
-            plansState[courseId] = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
-            await indexPlans(result, courseId: courseId, store: store)
-        } catch RefreshError.staleGeneration {
-            plansState[courseId, default: CollectionState()].phase = .idle
+            plansState[courseId] = state
+            await indexPlans(result, courseId: courseId, store: session.store)
         } catch {
-            plansState[courseId, default: CollectionState()].phase = .failed(message(for: error))
+            if let message = refreshFailure(error, session: session) { plansState[courseId]?.phase = .failed(message) }
         }
     }
 
@@ -912,13 +1295,10 @@ final class AppModel {
     /// it is silent; the Plans tab reports its own state.
     func loadTopics(courseId: Int) async {
         guard case .ready = authState else { return }
-        let session = authState
-        let store = snapshots
-        let account = generation
+        let session = CollectionSession(self)
+        let store = session.store
         let key = "topics-\(courseId)"
-        func isCurrent() -> Bool {
-            !Task.isCancelled && account == generation && session == authState && store === snapshots
-        }
+        func isCurrent() -> Bool { session.isCurrent(self) }
 
         if topics[courseId] == nil, let saved = await store?.load(Topic.self, collection: key) {
             guard isCurrent() else { return }
@@ -949,19 +1329,30 @@ final class AppModel {
     }
 
     func loadFolder(courseId: Int, folderId: Int?) async {
+        let session = CollectionSession(self)
         let key = Self.folderKey(courseId: courseId, folderId: folderId)
-        if resources[key] == nil, let snapshot = await snapshots?.load(Resource.self, collection: key) {
-            resources[key] = snapshot.records
-            resourcesState[key, default: CollectionState()].lastSuccess = snapshot.lastSuccess
-        }
-        guard isStale(resourcesState[key] ?? CollectionState()) else { return }
+        await restoreFolder(key: key, session: session)
+        guard session.isCurrent(self), isStale(resourcesState[key] ?? CollectionState()) else { return }
         await refreshFolder(courseId: courseId, folderId: folderId)
     }
 
+    private func restoreFolder(key: String, session: CollectionSession) async {
+        if resources[key] == nil, let snapshot = await session.store?.load(Resource.self, collection: key) {
+            guard session.isCurrent(self), resources[key] == nil, resourcesState[key]?.phase != .loading else { return }
+            resources[key] = snapshot.records
+            resourcesState[key] = CollectionState(lastSuccess: snapshot.lastSuccess, isIncomplete: snapshot.coverage == .incomplete)
+        }
+    }
+
     func refreshFolder(courseId: Int, folderId: Int?) async {
-        let store = snapshots
+        let session = CollectionSession(self)
         let key = Self.folderKey(courseId: courseId, folderId: folderId)
+        await restoreFolder(key: key, session: session)
+        guard session.isCurrent(self), case .ready = authState, resourcesState[key]?.phase != .loading else { return }
         resourcesState[key, default: CollectionState()].phase = .loading
+        defer {
+            if session.matches(self), resourcesState[key]?.phase == .loading { resourcesState[key]?.phase = .idle }
+        }
         do {
             let result = try await fetch(key: key) { client in
                 if let folderId {
@@ -970,23 +1361,32 @@ final class AppModel {
                     try await client.rootResources(courseId: courseId)
                 }
             }
-            let now = Date()
+            guard let state = await savePage(result, key: key, session: session) else { return }
             resources[key] = result.items
-            try? await snapshots?.save(result.items, collection: key, coverage: result.isComplete ? .complete : .incomplete, checkpoint: nil, at: now)
-            resourcesState[key] = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
-            await indexFolder(result, courseId: courseId, folderId: folderId, context: nil, store: store)
-        } catch RefreshError.staleGeneration {
-            resourcesState[key, default: CollectionState()].phase = .idle
+            resourcesState[key] = state
+            await indexFolder(result, courseId: courseId, folderId: folderId, context: nil, store: session.store)
         } catch {
-            resourcesState[key, default: CollectionState()].phase = .failed(message(for: error))
+            if let message = refreshFailure(error, session: session) { resourcesState[key]?.phase = .failed(message) }
         }
     }
 
-    func savedFileURL(for resource: Resource) async -> URL? {
+    func savedFileURL(for resource: Resource, keep: Bool = false) async -> URL? {
         guard let downloads else { return nil }
-        if let asset = savedAssets[resource.id], let file = downloads.fileURLIfPresent(for: asset) { return file }
-        guard let asset = await downloads.asset(for: resource.id) else { return nil }
+        if keep { await keepSavedAsset(resource.id, store: downloads) }
+        guard let asset = await downloads.asset(for: resource.id), downloads === self.downloads else { return nil }
         return downloads.fileURLIfPresent(for: asset)
+    }
+
+    func keepSavedAsset(_ key: String, store: DownloadStore) async {
+        guard store === downloads else { return }
+        do {
+            try await store.markKept(resourceKey: key)
+            let asset = await store.asset(for: key)
+            guard store === downloads, savedAssets[key] != nil else { return }
+            savedAssets[key] = asset
+        } catch {
+            Logger(subsystem: "app.laer.Laer", category: "downloads").error("could not keep prefetched file")
+        }
     }
 
     private static let messageAttachmentPrefix = "message-attachment:"
@@ -1176,14 +1576,54 @@ final class AppModel {
         }
     }
 
-    func download(_ resource: Resource, onPDFPage: FileAcquirer.PDFPageReady? = nil) async {
+    func download(
+        _ resource: Resource, onPDFPage: FileAcquirer.PDFPageReady? = nil,
+        isAutoPrefetched: Bool = false, replaceExisting: Bool = false
+    ) async {
+        guard case .ready = authState, let downloads, !Task.isCancelled else { return }
+        let key = resource.id
+        if let task = downloadTasks[key] {
+            if !isAutoPrefetched { downloadsToKeep.insert(key) }
+            await task.value
+            if !isAutoPrefetched { await keepSavedAsset(key, store: downloads) }
+            return
+        }
+        if !replaceExisting, let asset = savedAssets[key], downloads.fileURLIfPresent(for: asset) != nil {
+            if !isAutoPrefetched { await keepSavedAsset(key, store: downloads) }
+            return
+        }
+        let task = Task {
+            await acquireDownload(resource, store: downloads, onPDFPage: onPDFPage, isAutoPrefetched: isAutoPrefetched)
+            if downloadsToKeep.contains(key) { await keepSavedAsset(key, store: downloads) }
+        }
+        downloadTasks[key] = task
+        await withTaskCancellationHandler { await task.value } onCancel: {
+            if isAutoPrefetched {
+                Task { @MainActor [weak self] in
+                    if self?.downloadsToKeep.contains(key) != true { task.cancel() }
+                }
+            } else {
+                task.cancel()
+            }
+        }
+        if downloadTasks[key] == task {
+            downloadTasks[key] = nil
+            downloadsToKeep.remove(key)
+        }
+    }
+
+    private func acquireDownload(
+        _ resource: Resource, store downloads: DownloadStore, onPDFPage: FileAcquirer.PDFPageReady?,
+        isAutoPrefetched: Bool
+    ) async {
+        let key = resource.id
         #if DEBUG
         if fixtureFlag != nil {
-            await saveFixtureFile(resource)
+            await saveFixtureFile(resource, isAutoPrefetched: isAutoPrefetched && !downloadsToKeep.contains(key))
             return
         }
         #endif
-        guard let session = webSession, let downloads, let client = makeClient() else { return }
+        guard let session = webSession, let client = makeClient() else { return }
         downloadStates[resource.id] = .downloading
         defer {
             if downloads === self.downloads, downloadStates[resource.id] == .downloading {
@@ -1205,12 +1645,14 @@ final class AppModel {
                 .acquire(resource, tryExistingSession: tryExistingSession)
             Perf.mark("file acquired")
             defer { try? FileManager.default.removeItem(at: staged.file) }
+            guard !Task.isCancelled, downloads === self.downloads, session === webSession else { return }
             let asset = try await downloads.commit(
                 stagedFile: staged.file,
                 resourceKey: resource.id,
                 suggestedName: staged.suggestedName ?? resource.title,
                 contentType: staged.contentType,
-                at: Date()
+                at: Date(),
+                isAutoPrefetched: isAutoPrefetched && !downloadsToKeep.contains(key)
             )
             guard !Task.isCancelled, downloads === self.downloads else { return }
             savedAssets[resource.id] = asset
@@ -1232,6 +1674,28 @@ final class AppModel {
         } catch {
             guard downloads === self.downloads else { return }
             downloadStates[resource.id] = .failed("The download failed.")
+        }
+    }
+
+    func enforcePrefetchQuota(store: DownloadStore, maxBytes: UInt64 = 300 * 1024 * 1024) async {
+        guard store === downloads else { return }
+        do {
+            let evicted = try await store.evictAutoPrefetchedIfNeeded(maxBytes: maxBytes)
+            guard store === downloads else { return }
+            for key in evicted {
+                guard let asset = savedAssets[key], asset.isAutoPrefetched, store.fileURLIfPresent(for: asset) == nil else { continue }
+                savedAssets[key] = nil
+                searchDocumentQueue[key] = nil
+                OfficePDFConverter.removeCached(for: key)
+                convertedFiles[key] = nil
+                failedConversions.remove(key)
+                let index = searchIndex
+                try? await index?.removeDocument(resourceKey: key)
+                guard store === downloads else { return }
+                if index === searchIndex { searchRevision += 1 }
+            }
+        } catch {
+            Logger(subsystem: "app.laer.Laer", category: "downloads").error("prefetch quota cleanup failed")
         }
     }
 
@@ -1274,12 +1738,41 @@ final class AppModel {
         }
     }
 
-    static func forTesting(signedOut: Bool = false) async -> AppModel {
+    static func forTesting(signedOut: Bool = false, transport: (any ReadTransport)? = nil) async -> AppModel {
         FixtureWrites.shared.reset()
         let model = AppModel(forTesting: ())
+        model.fixtureTransport = transport
         await model.startFixtureMode(signedOut: signedOut)
         return model
     }
+
+    func finishOAuthForTesting(
+        exchange: (String, String) async throws -> OAuthTokens, save: (OAuthTokens) -> Bool
+    ) async {
+        guard let site, let pkce = try? OAuthPKCE(),
+              let callback = URL(string: "itsl-itslearning://login?state=fixture&code=fixture") else { return }
+        await finishOAuth(redirect: callback, site: site, state: "fixture", pkce: pkce, attempt: authGeneration,
+                          exchange: exchange, save: save)
+    }
+
+    func useOAuthForTesting(_ tokens: OAuthTokens, recovery: SessionRecovery? = nil) {
+        guard let site else { return }
+        useOAuth(tokens, site: site)
+        if let recovery { self.recovery = recovery }
+    }
+
+    func hasBearerForTesting() -> Bool { bearer != nil }
+
+    func installWebsiteIdentityForTesting(_ person: Person) async {
+        guard let site else { return }
+        await enter(person: person, site: site)
+    }
+
+    func installVerifiedIdentityForTesting(_ person: Person) async {
+        guard let site else { return }
+        await installVerifiedIdentity(person, site: site)
+    }
+
 
     func waitForSearchReadyForTesting() async {
         await startupSearchTask?.value
@@ -1304,8 +1797,11 @@ final class AppModel {
         searchOCRBatch?.cancel()
         searchOCRBatch = nil
         let dir = fixtureRoot
+        let ephemeral = ephemeralRoot
         fixtureRoot = nil
+        ephemeralRoot = nil
         resetAccountState()
+        if let ephemeral { try? Self.removeIfPresent(ephemeral) }
         FixtureWrites.shared.reset()
         if let dir { try? FileManager.default.removeItem(at: dir) }
     }
@@ -1319,18 +1815,20 @@ final class AppModel {
         await refreshAll()
     }
 
-    private func saveFixtureFile(_ resource: Resource) async {
+    private func saveFixtureFile(_ resource: Resource, isAutoPrefetched: Bool) async {
         guard [702, 704].contains(resource.elementId), let downloads else {
             downloadStates[resource.id] = .websiteOnly
             return
         }
         let staged = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: staged) }
         do {
             let scannedPage = UserDefaults.standard.bool(forKey: "LaerFixtureScannedPDF") ? 2 : nil
             try FixtureFiles.pdf(title: resource.title, scannedPage: scannedPage).write(to: staged)
+            guard downloads === self.downloads, !Task.isCancelled else { return }
             let asset = try await downloads.commit(
                 stagedFile: staged, resourceKey: resource.id, suggestedName: "\(resource.title).pdf",
-                contentType: "application/pdf", at: Date()
+                contentType: "application/pdf", at: Date(), isAutoPrefetched: isAutoPrefetched
             )
             guard downloads === self.downloads else { return }
             savedAssets[resource.id] = asset

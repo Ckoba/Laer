@@ -32,7 +32,7 @@ enum Appearance: String, CaseIterable {
 
     /// Sets the whole app's appearance, so the main window, file viewer and menu bar window follow it.
     /// UI tests keep the system's, so RootView's test appearance decides there.
-    func apply() {
+    @MainActor func apply() {
         let arguments = ProcessInfo.processInfo.arguments
         guard !arguments.contains("-LaerUITestReset"), !arguments.contains("-LaerUITestAppearance") else { return }
         switch self {
@@ -60,8 +60,9 @@ private struct GeneralSettings: View {
     @Environment(AppModel.self) private var model
     @AppStorage(Appearance.key) private var appearance = Appearance.system
     @AppStorage(LaerApp.showsMenuBarKey) private var showsMenuBarExtra = true
-    @AppStorage(AppModel.fetchesAheadKey) private var fetchesAhead = true
+    @AppStorage(AppModel.fetchesAheadKey) private var fetchesAhead = false
     @State private var confirmsBriefsOff = false
+    @State private var confirmsRemovingLocalData = false
 
     var body: some View {
         Form {
@@ -76,7 +77,7 @@ private struct GeneralSettings: View {
                     Text("Get files before you open them")
                     Text("Finds download links for files on screen and saves the next lessons’ readings, so they open at once. Off: only files you click are fetched.")
                 }
-                .onChange(of: fetchesAhead) { if !fetchesAhead { model.stopFetchingAhead() } }
+                .onChange(of: fetchesAhead) { model.setFetchesAhead(fetchesAhead) }
             }
             // Shown only where Apple's on-device model can run (decision 0014).
             if model.briefs.isAvailable {
@@ -90,12 +91,36 @@ private struct GeneralSettings: View {
                     ))
                 }
             }
+            if case .ready = model.authState {
+                Section("Account") {
+                    Button(model.hasVerifiedIdentity ? "Sign Out (Keep Offline Files)" : "Sign Out (Deletes Temporary Session Data)") {
+                        Task { await model.signOut() }
+                    }
+                    Button("Sign Out and Remove All Local Data", role: .destructive) {
+                        confirmsRemovingLocalData = true
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
+        .confirmsLocalDataRemoval(isPresented: $confirmsRemovingLocalData, model: model)
         .confirmationDialog("Turn off lecture briefs?", isPresented: $confirmsBriefsOff) {
             Button("Turn Off and Delete Briefs", role: .destructive) { Task { await model.setOnDeviceBriefs(false) } }
         } message: {
             Text("The briefs made on this Mac are deleted.")
+        }
+    }
+}
+
+extension View {
+    func confirmsLocalDataRemoval(isPresented: Binding<Bool>, model: AppModel) -> some View {
+        alert("Sign Out and Remove All Local Data?", isPresented: isPresented) {
+            Button("Cancel", role: .cancel) {}
+            Button("Sign Out and Remove All Local Data", role: .destructive) {
+                Task { await model.signOut(removeLocalData: true) }
+            }
+        } message: {
+            Text("This deletes offline files, course data, search indexes, lecture briefs, and the exam plan from this Mac.")
         }
     }
 }

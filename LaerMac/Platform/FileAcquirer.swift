@@ -295,8 +295,22 @@ final class FileAcquirer: NSObject, WKScriptMessageHandler, WKNavigationDelegate
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let resolverView, message.webView === resolverView,
+              Self.isTrustedFrame(message.frameInfo, site: session.site.baseURL),
               let text = message.body as? String, let url = URL(string: text) else { return }
         finish(with: url)
+    }
+
+    /// The resolver script runs in every frame, so only the page itself and itslearning's own frames
+    /// may answer. A third-party frame (an LTI tool, an embed) can never name the file to fetch.
+    static func isTrustedFrame(_ frame: WKFrameInfo, site: URL) -> Bool {
+        if frame.isMainFrame { return true }
+        let origin = frame.securityOrigin
+        guard origin.protocol.lowercased() == "https" else { return false }
+        let host = origin.host.lowercased()
+        let port = origin.port == 0 ? 443 : origin.port
+        if host == "resource.itslearning.com", port == 443 { return true }
+        guard let siteHost = site.host()?.lowercased() else { return false }
+        return host == siteHost && port == (site.port ?? 443)
     }
 
     /// The PDF viewer's address names the file, so the viewer itself never needs to load.
@@ -356,8 +370,9 @@ final class FileAcquirer: NSObject, WKScriptMessageHandler, WKNavigationDelegate
     /// Start the next resolver's web process without making any website request.
     static func prepareResolver(for session: WebSession) {
         guard session.standbyFileResolver == nil else { return }
+        let store = session.dataStore
         session.standbyFileResolver = Task(priority: .utility) {
-            let view = await makeResolverView()
+            let view = await makeResolverView(in: store)
             if !Task.isCancelled { view.loadHTMLString("", baseURL: nil) }
             return view
         }
@@ -368,13 +383,13 @@ final class FileAcquirer: NSObject, WKScriptMessageHandler, WKNavigationDelegate
             session.standbyFileResolver = nil
             return await standby.value
         }
-        return await Self.makeResolverView()
+        return await Self.makeResolverView(in: session.dataStore)
     }
 
-    private static func makeResolverView() async -> WKWebView {
+    private static func makeResolverView(in dataStore: WKWebsiteDataStore) async -> WKWebView {
         let world = WKContentWorld.world(name: "LaerFileResolver")
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
+        configuration.websiteDataStore = dataStore
         if let list = await Self.loadBlockList() {
             configuration.userContentController.add(list)
         }

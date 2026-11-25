@@ -5,7 +5,7 @@ deep-research-report*.md
 # Local signing and machine settings
 Config/Local.xcconfig
 
-# Agent and editor state; the shared .claude setup (hooks, skills, agents, settings.json) is tracked
+# Agent and editor state
 .claude/settings.local.json
 .claude/worktrees/
 *.xcuserstate
@@ -28,7 +28,7 @@ probe-report*.json
 # Machine-local devkit config: absolute paths and the personal terms location
 devkit.config.json
 
-# Windows build products
+# Other build output
 **/bin/
 **/obj/
 /artifacts/

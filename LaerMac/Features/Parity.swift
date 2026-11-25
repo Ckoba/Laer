@@ -1,8 +1,9 @@
+import CryptoKit
 import LaerCore
 import Observation
 import SwiftUI
 
-/// Which parity screens are in navigation. Only routes marked pass in docs/feasibility.md are on.
+/// Which parity screens are in navigation.
 enum ParityGate {
     static let messages = true
     static let pages = true
@@ -13,7 +14,6 @@ enum ParityGate {
     static let personalCalendar = true
     /// `assignments/{id}/v1` passes for CustomActivity tasks; 403 means the task is not an assignment.
     static let assignments = true
-    /// Pass with OAuth sign-in. See docs/feasibility.md.
     static let notifications = true
     static let bulletins = true
     /// Assessment routes are role- and site-dependent. When on, the Grades tab still appears
@@ -21,6 +21,32 @@ enum ParityGate {
     static let grades = true
     /// Writes need `AppModel.write`, which a bearer or fixture transport backs. Each one is a single user action.
     static let writes = true
+}
+
+/// The account and store a collection read started with.
+struct CollectionSession: Equatable {
+    let store: SnapshotStore?
+    private let personId: Int?
+    private let authGeneration: Int
+
+    @MainActor init(_ model: AppModel) {
+        store = model.snapshots
+        if case .ready(let person) = model.authState {
+            personId = person.personId
+        } else {
+            personId = nil
+        }
+        authGeneration = model.authGeneration
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.store === rhs.store && lhs.personId == rhs.personId
+            && lhs.authGeneration == rhs.authGeneration
+    }
+
+    @MainActor func matches(_ model: AppModel) -> Bool { self == Self(model) }
+
+    @MainActor func isCurrent(_ model: AppModel) -> Bool { !Task.isCancelled && matches(model) }
 }
 
 /// One cached collection for a feature screen: snapshot first, then a refresh when stale.
@@ -43,31 +69,66 @@ final class CollectionLoader<Record: Codable & Sendable> {
         self.read = read
     }
 
-    func load(using model: AppModel) async {
-        if state.lastSuccess == nil, let snapshot = await model.snapshots?.load(Record.self, collection: key) {
-            records = snapshot.records
-            state.lastSuccess = snapshot.lastSuccess
-            state.isIncomplete = snapshot.coverage == .incomplete
+    @ObservationIgnored private var session: CollectionSession?
+    @ObservationIgnored private var requestID: UUID?
+
+    private func scope(to model: AppModel) -> CollectionSession {
+        let current = CollectionSession(model)
+        if session != current {
+            session = current
+            requestID = nil
+            records = []
+            state = CollectionState()
+            lastError = nil
         }
+        return current
+    }
+
+    func load(using model: AppModel) async {
+        guard !Task.isCancelled else { return }
+        let session = scope(to: model)
+        if state.lastSuccess == nil, requestID == nil,
+           let snapshot = await session.store?.load(Record.self, collection: key) {
+            guard session.isCurrent(model), requestID == nil else { return }
+            if state.lastSuccess == nil {
+                records = snapshot.records
+                state.lastSuccess = snapshot.lastSuccess
+                state.isIncomplete = snapshot.coverage == .incomplete
+            }
+        }
+        guard session.isCurrent(model) else { return }
         if let last = state.lastSuccess, Date().timeIntervalSince(last) < FreshnessLine.staleAfter { return }
         await refresh(using: model)
     }
 
     func refresh(using model: AppModel) async {
+        guard !Task.isCancelled else { return }
+        let session = scope(to: model)
+        let request = UUID()
+        requestID = request
         state.phase = .loading
+        defer {
+            if requestID == request {
+                requestID = nil
+                if session.matches(model), state.phase == .loading { state.phase = .idle }
+            }
+        }
         do {
             let result = try await model.fetch(key: key, read)
+            guard session.isCurrent(model), requestID == request else { return }
             let now = Date()
-            records = result.items
             let saved: Coverage = result.isComplete ? coverage : .incomplete
-            try? await model.snapshots?.save(result.items, collection: key, coverage: saved, checkpoint: nil, at: now)
+            try? await session.store?.save(result.items, collection: key, coverage: saved, checkpoint: nil, at: now)
+            guard session.isCurrent(model), requestID == request else { return }
+            records = result.items
             state = CollectionState(phase: .idle, lastSuccess: now, isIncomplete: !result.isComplete)
             lastError = nil
         } catch is CancellationError {
-            state.phase = .idle
+            return
         } catch RefreshError.staleGeneration {
-            state.phase = .idle
+            return
         } catch {
+            guard session.isCurrent(model), requestID == request else { return }
             lastError = error
             state.phase = .failed(model.message(for: error))
         }
@@ -98,66 +159,70 @@ func currentMinute() -> Date {
     Date(timeIntervalSinceReferenceDate: (Date().timeIntervalSinceReferenceDate / 60).rounded(.down) * 60)
 }
 
-/// Parsed course text, kept so a view body never parses the same HTML twice.
-/// Views are redrawn far more often than their text changes.
+/// Parsed course text shared by the full body and row previews.
 @MainActor
 enum RichTextCache {
-    private static var parsed: [String: [RichBlock]] = [:]
-    private static var plain: [String: String] = [:]
-    private static var inlined: [String: AttributedString] = [:]
-    /// Enough for every row on the busiest screen; cleared whole when exceeded.
-    private static let limit = 600
-
-    static func blocks(_ html: String) -> [RichBlock] {
-        if let hit = parsed[html] { return hit }
-        if parsed.count >= limit { parsed.removeAll(keepingCapacity: true) }
-        let result = RichText.blocks(fromHTML: html)
-        parsed[html] = result
-        return result
+    @MainActor
+    @Observable
+    fileprivate final class Entry {
+        var content: ParsedRichText?
+        @ObservationIgnored var parse: Task<ParsedRichText, Never>?
+        var inline: AttributedString?
+        @ObservationIgnored var isPreparingInline = false
     }
 
-    /// One line for a row's preview: breaks and paragraphs become spaces, so `lineLimit` shows
-    /// as much of the text as fits rather than only its first paragraph.
-    static func preview(_ html: String) -> String {
-        if let hit = plain[html] { return hit }
-        if plain.count >= limit { plain.removeAll(keepingCapacity: true) }
-        let result = RichText.preview(blocks(html))
-        plain[html] = result
-        return result
+    private static let cache: NSCache<NSString, Entry> = {
+        let cache = NSCache<NSString, Entry>()
+        cache.countLimit = 600
+        cache.totalCostLimit = 32 * 1024 * 1024
+        return cache
+    }()
+
+    static func key(for html: String) -> String {
+        let digest = SHA256.hash(data: Data(html.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    /// A short text with its inline formatting (bold, italic, underline, strikethrough) for a row
-    /// that is itself a button, where a selectable body would take its clicks. Blocks become lines.
-    static func inline(_ html: String) -> AttributedString {
-        if let hit = inlined[html] { return hit }
-        if inlined.count >= limit { inlined.removeAll(keepingCapacity: true) }
-        var result = AttributedString()
-        for block in blocks(html) {
-            let runs: [RichRun]
-            switch block {
-            case .heading(_, let r), .paragraph(let r), .quote(let r): runs = r
-            case .listItem(let ordered, let number, _, let r): runs = [RichRun(text: ordered ? "\(number). " : "\u{2022} ")] + r
-            case .table(let rows): runs = rows.flatMap { $0.flatMap { $0.runs + [RichRun(text: " ")] } }
-            case .code(let text): runs = [RichRun(text: text)]
-            case .image(_, let alt): runs = alt.map { [RichRun(text: $0)] } ?? []
-            case .embed, .rule: runs = []
-            }
-            guard !runs.isEmpty else { continue }
-            if !result.characters.isEmpty { result += AttributedString("\n") }
-            for run in runs {
-                var part = AttributedString(run.text)
-                var intent: InlinePresentationIntent = []
-                if run.bold { intent.insert(.stronglyEmphasized) }
-                if run.italic { intent.insert(.emphasized) }
-                if run.code { intent.insert(.code) }
-                if !intent.isEmpty { part.inlinePresentationIntent = intent }
-                if run.underline { part.underlineStyle = .single }
-                if run.strikethrough { part.strikethroughStyle = .single }
-                result += part
-            }
+    private static func entry(for html: String, key: String) -> Entry? {
+        guard !html.isEmpty else { return nil }
+        if let hit = cache.object(forKey: key as NSString) { return hit }
+        let entry = Entry()
+        let parse = Task.detached(priority: .userInitiated) { ParsedRichText(html: html) }
+        entry.parse = parse
+        cache.setObject(entry, forKey: key as NSString, cost: 1024 + 4 * html.utf8.count)
+        Task {
+            entry.content = await parse.value
+            entry.parse = nil
         }
-        inlined[html] = result
-        return result
+        return entry
+    }
+
+    static func cachedBlocks(key: String) -> [RichBlock]? {
+        cache.object(forKey: key as NSString)?.content?.blocks
+    }
+
+    static func loadBlocks(_ html: String, key: String) async -> [RichBlock] {
+        guard let entry = entry(for: html, key: key) else { return [] }
+        if let content = entry.content { return content.blocks }
+        return await entry.parse?.value.blocks ?? []
+    }
+
+    /// One line for a row's preview, with breaks and paragraphs collapsed to spaces.
+    static func preview(_ html: String) -> String {
+        entry(for: html, key: key(for: html))?.content?.preview ?? ""
+    }
+
+    /// Formatted preview for a row that needs to keep its own click target.
+    static func inline(_ html: String) -> AttributedString {
+        guard let entry = entry(for: html, key: key(for: html)) else { return AttributedString() }
+        if let inline = entry.inline { return inline }
+        guard let content = entry.content else { return AttributedString() }
+        if !entry.isPreparingInline {
+            entry.isPreparingInline = true
+            let format = Task.detached(priority: .userInitiated) { content.inlinePreview() }
+            Task { entry.inline = await format.value }
+        }
+        return AttributedString()
     }
 }
 
@@ -166,21 +231,42 @@ enum RichTextCache {
 struct RichTextView: View {
     @Environment(AppModel.self) private var model
     @Environment(Navigation.self) private var navigation
-    let blocks: [RichBlock]
+    private enum Content {
+        case html(String)
+        case blocks([RichBlock])
+    }
+
+    private let content: Content
+    @State private var parsed: (key: String, blocks: [RichBlock])?
     var tone: RichTextTone = .page
     var hugsWidth = false
 
     init(html: String, tone: RichTextTone = .page, hugsWidth: Bool = false) {
-        blocks = RichTextCache.blocks(html)
+        content = .html(html)
         self.tone = tone
         self.hugsWidth = hugsWidth
     }
 
     init(blocks: [RichBlock]) {
-        self.blocks = blocks
+        content = .blocks(blocks)
     }
 
     var body: some View {
+        switch content {
+        case .blocks(let blocks):
+            rendered(blocks)
+        case .html(let html):
+            let key = RichTextCache.key(for: html)
+            rendered((parsed?.key == key ? parsed?.blocks : RichTextCache.cachedBlocks(key: key)) ?? [])
+                .task(id: key) {
+                    let blocks = await RichTextCache.loadBlocks(html, key: key)
+                    guard !Task.isCancelled else { return }
+                    parsed = (key, blocks)
+                }
+        }
+    }
+
+    private func rendered(_ blocks: [RichBlock]) -> some View {
         RichTextBody(blocks: blocks, tone: tone, hugsWidth: hugsWidth) { link in
             if let url = resolve(link), !navigation.openSiteLink(url) { NSWorkspace.shared.open(url) }
         }
@@ -219,12 +305,15 @@ final class GradesAvailability {
 
     func probe(courseId: Int, using model: AppModel) async {
         guard ParityGate.grades, let key = Self.key(courseId, model), known[key] == nil, !probing.contains(key) else { return }
+        let session = CollectionSession(model)
         probing.insert(key)
         defer { probing.remove(key) }
         do {
             let record = try await model.fetch(key: "grades-probe-\(courseId)") { try await $0.assessmentRecord(courseId: courseId) }
+            guard session.isCurrent(model) else { return }
             known[key] = !((record.items ?? []).isEmpty && (record.finalItems ?? []).isEmpty)
         } catch APIError.forbidden, APIError.notFound {
+            guard session.isCurrent(model) else { return }
             known[key] = false
         } catch {
             // Offline or a passing failure: try again on the next visit.
@@ -232,7 +321,7 @@ final class GradesAvailability {
     }
 
     private static func key(_ courseId: Int, _ model: AppModel) -> String? {
-        guard case .ready(let person) = model.authState else { return nil }
-        return "\(person.personId)-\(courseId)"
+        guard case .ready(let person) = model.authState, let site = model.site else { return nil }
+        return "\(site.customerId)-\(person.personId)-\(courseId)"
     }
 }

@@ -1,16 +1,48 @@
 import Foundation
 
-/// Read-only parity routes. See docs/feasibility.md for which ones accept a website session.
+/// Read-only parity routes.
 extension ItslearningClient {
-    /// The signed-in person's calendar from `from` onward. The route requires `fromDate`.
-    public func calendarEvents(from: Date) async throws -> PagedResult<CalendarEvent> {
-        try await collect { index in
+    /// The signed-in person's calendar from `from` onward, optionally through `toDate`.
+    public func calendarEvents(from: Date, toDate: Date? = nil) async throws -> PagedResult<CalendarEvent> {
+        func fetch(_ index: Int) async throws -> Page<CalendarEvent> {
             try await get(ReadRequest(
                 path: "/restapi/personal/calendar/events/v1",
                 query: [URLQueryItem(name: "fromDate", value: Self.queryDate(from))] + pageQuery(index: index, size: Self.maxPageSize),
                 routeTemplate: "calendar/events/v1"
-            )) as Page<CalendarEvent>
+            ))
         }
+        guard let toDate else { return try await collect(fetch: fetch) }
+
+        var items: [CalendarEvent] = []
+        var received = 0
+        var lastSeenStart: Date?
+        var isMonotonic = true
+        for index in 0..<Self.pageLimit {
+            try Task.checkCancellation()
+            let page = try await fetch(index)
+            if let reportedIndex = page.pageIndex, reportedIndex != index { break }
+            received += page.items.count
+            for event in page.items {
+                if let start = event.fromDate {
+                    if let previous = lastSeenStart, start < previous { isMonotonic = false }
+                    lastSeenStart = start
+                }
+                if (event.fromDate ?? .distantFuture) <= toDate {
+                    items.append(event)
+                }
+            }
+            // Stop early only when returned events stay in start-date order past `toDate`.
+            if isMonotonic, let lastStart = page.items.last(where: { $0.fromDate != nil })?.fromDate, lastStart > toDate {
+                return PagedResult(items: items, isComplete: true)
+            }
+            if let total = page.total {
+                if received >= total { return PagedResult(items: items, isComplete: true) }
+                if page.items.isEmpty { break }
+            } else if page.items.count < (page.pageSize ?? Self.maxPageSize) {
+                return PagedResult(items: items, isComplete: true)
+            }
+        }
+        return PagedResult(items: items, isComplete: false)
     }
 
     public func courseCalendarEvents(courseId: Int, from: Date, to: Date) async throws -> PagedResult<CalendarEvent> {

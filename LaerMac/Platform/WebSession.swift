@@ -1,13 +1,32 @@
+import AppKit
+import AuthenticationServices
 import Foundation
+import Observation
 import LaerCore
 import WebKit
 
-/// Owns the persistent website session and the one web view used for sign-in and same-origin reads.
 @MainActor
+final class OAuthPresentationContext: NSObject, ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        if let window = NSApp.keyWindow
+            ?? NSApp.mainWindow
+            ?? NSApp.windows.first(where: { $0.isVisible && $0.canBecomeMain })
+            ?? NSApp.windows.first(where: \.isVisible)
+        {
+            return window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        return NSApp.windows.first ?? ASPresentationAnchor()
+    }
+}
+
+/// Owns the website session and the one web view used for sign-in and same-origin reads.
+@MainActor
+@Observable
 final class WebSession: NSObject {
     let site: Site
     /// Created on first use for sign-in, same-origin reads, or preparing the file session.
-    lazy var webView: WKWebView = {
+    @ObservationIgnored lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = dataStore
         let view = WKWebView(frame: .zero, configuration: configuration)
@@ -18,7 +37,8 @@ final class WebSession: NSObject {
         #endif
         return view
     }()
-    private let dataStore = WKWebsiteDataStore.default()
+    let dataStore = WKWebsiteDataStore.nonPersistent()
+    private(set) var currentHost: String?
     private var navigationWaiters: [CheckedContinuation<Void, Never>] = []
     var standbyFileResolver: Task<WKWebView, Never>?
     private(set) var hasFileSession = false
@@ -38,8 +58,6 @@ final class WebSession: NSObject {
 
     /// Called after each finished navigation, so sign-in can notice the return to the site.
     var onNavigationFinished: (() -> Void)?
-    /// Called with the OAuth redirect. The custom scheme never leaves this view.
-    var onOAuthRedirect: ((URL) -> Void)?
     var onLoadFailed: (() -> Void)?
 
     init(site: Site) {
@@ -48,7 +66,7 @@ final class WebSession: NSObject {
     }
 
     var isOnSiteOrigin: Bool {
-        webView.url?.host() == site.baseURL.host() && webView.url?.scheme == "https"
+        webView.url.map { AvatarSession.sameOrigin($0, site.baseURL) } ?? false
     }
 
     func loadSite() {
@@ -130,7 +148,7 @@ final class WebSession: NSObject {
         guard let link = try? await client.ssoURL(for: page), !Task.isCancelled,
               AvatarSession.sameOrigin(link, site.baseURL), revision == fileSessionRevision, !hasFileSession else { return }
         webView.load(URLRequest(url: link))
-        await waitForNavigation(timeout: .seconds(4))
+        await waitForNavigation(timeout: .seconds(15))
         if !Task.isCancelled, webView.url == page, revision == fileSessionRevision {
             hasFileSession = true
             Perf.mark("file site session ready")
@@ -184,19 +202,38 @@ final class WebSession: NSObject {
     /// Removes this app's website data, which ends its session. Saved files are not touched.
     func clearWebsiteData() async {
         invalidateFileSession()
+        webView.stopLoading()
+        releaseWaiters()
+        currentHost = nil
+        await Self.clear(dataStore)
+    }
+
+    static func clearLegacyWebsiteData() async {
+        await clear(.default())
+    }
+
+    private static func clear(_ store: WKWebsiteDataStore) async {
         let types = WKWebsiteDataStore.allWebsiteDataTypes()
-        let records = await dataStore.dataRecords(ofTypes: types)
-        await dataStore.removeData(ofTypes: types, for: records)
+        let records = await store.dataRecords(ofTypes: types)
+        await store.removeData(ofTypes: types, for: records)
     }
 }
 
 extension WebSession: WKNavigationDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
-        if let url = navigationAction.request.url, url.scheme == OAuthClient.redirectScheme {
-            onOAuthRedirect?(url)
-            return .cancel
+        Self.permitsNavigation(to: navigationAction.request.url) ? .allow : .cancel
+    }
+
+    private static func permitsNavigation(to url: URL?) -> Bool {
+        switch url?.scheme?.lowercased() {
+        case "https": url?.host() != nil
+        case "about": true
+        default: false
         }
-        return .allow
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        currentHost = webView.url?.scheme == "https" ? webView.url?.host() : nil
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -210,7 +247,6 @@ extension WebSession: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         releaseWaiters()
-        // Cancelling happens on every OAuth redirect, and that isn't a failure.
         let code = (error as? URLError)?.code
         if code == .notConnectedToInternet || code == .networkConnectionLost || code == .timedOut || code == .cannotFindHost {
             onLoadFailed?()
@@ -226,7 +262,7 @@ extension WebSession: WKUIDelegate {
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        if navigationAction.targetFrame == nil {
+        if navigationAction.targetFrame == nil, Self.permitsNavigation(to: navigationAction.request.url) {
             webView.load(navigationAction.request)
         }
         return nil

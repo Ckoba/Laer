@@ -248,8 +248,8 @@ import Testing
         let db = try await SnapshotStore(rootDirectory: root, accountKey: "a").searchDatabase()
         let asset = LocalAsset(id: "LearningToolElement-7", relativePath: "revision.pdf", displayName: "Kompendium.pdf",
                                byteCount: 1, contentType: "application/pdf", downloadedAt: .distantPast)
-        try await db.replaceDocument(asset: asset, resource: nil, pages: (0..<40).map {
-            DocumentSearchPage(index: $0, text: "Side \($0) om regression og residualer.")
+        try await db.replaceDocument(asset: asset, resource: nil, pages: (0..<40).map { (page: Int) in
+            DocumentSearchPage(index: page, text: "Side \(page) om regression og residualer.")
         })
         try await db.update(group: "plans", hits: [
             SearchHit(id: "plan-a", kind: .plan, title: "Regression, uge 5"),

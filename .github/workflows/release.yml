@@ -1,0 +1,301 @@
+# Builds, signs, notarizes and publishes one Laer release from a version tag.
+#
+# Self-contained: it needs only the app source, so it runs unchanged in the public repository.
+# Secrets live in the protected `release` environment; see docs/release-ci-setup.md in the private
+# repository, summarised in each step below. Nothing secret is written to the log or the artifacts.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to release, such as v0.1.6
+        required: true
+        type: string
+      publish:
+        description: Publish the release immediately instead of leaving a draft
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: Sign, notarize and publish
+    runs-on: macos-26
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: write      # create the release and upload assets
+      id-token: write      # Sigstore identity for the provenance attestation
+      attestations: write  # store the attestation on this repository
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      PUBLISH: ${{ github.event.inputs.publish || 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ github.event.inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - name: Check tag and version
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH"; exit 1; }
+          version=$(awk -F= '/^MARKETING_VERSION/{gsub(/[[:space:]]/, "", $2); print $2}' Config/Base.xcconfig)
+          build=$(awk -F= '/^CURRENT_PROJECT_VERSION/{gsub(/[[:space:]]/, "", $2); print $2}' Config/Base.xcconfig)
+          [[ "v$version" == "$TAG" ]] || { echo "::error::tag $TAG does not match MARKETING_VERSION $version"; exit 1; }
+          {
+            echo "VERSION=$version"
+            echo "DD=$RUNNER_TEMP/dd"
+            echo "OUT=$RUNNER_TEMP/release-out"
+            echo "SECRETS_DIR=$RUNNER_TEMP/release-secrets"
+          } >> "$GITHUB_ENV"
+          echo "Laer $version (build $build) from $(git rev-parse HEAD)"
+          xcodebuild -version
+
+      - name: Run headless tests
+        run: |
+          swift test --package-path Packages/LaerCore --scratch-path "$RUNNER_TEMP/spm" \
+            -Xswiftc -warnings-as-errors
+          xcodebuild -project Laer.xcodeproj -scheme Laer -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' -derivedDataPath "$RUNNER_TEMP/dd-test" \
+            -onlyUsePackageVersionsFromResolvedFile -skip-testing:LaerMacUITests \
+            COMPILER_INDEX_STORE_ENABLE=NO CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            test | xcbeautify --renderer github-actions
+
+      # MACOS_CERTIFICATE_P12_BASE64 / MACOS_CERTIFICATE_PASSWORD: a Developer ID Application
+      # certificate with its private key, exported as .p12 and base64-encoded.
+      - name: Import Developer ID certificate into a temporary keychain
+        env:
+          P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          [[ -n "$P12_BASE64" && -n "$P12_PASSWORD" ]] || { echo "::error::MACOS_CERTIFICATE_P12_BASE64 and MACOS_CERTIFICATE_PASSWORD are required"; exit 1; }
+          umask 077
+          mkdir -p "$SECRETS_DIR"
+          keychain="$RUNNER_TEMP/laer-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 32)
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 7200 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$P12_BASE64" | base64 --decode > "$SECRETS_DIR/certificate.p12"
+          security import "$SECRETS_DIR/certificate.p12" -k "$keychain" -P "$P12_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          rm -f "$SECRETS_DIR/certificate.p12"
+          # The Developer ID intermediate, in case the runner image lacks it; the .p12 may include it too.
+          if curl -fsSL --proto '=https' https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"; then
+            security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$keychain" >/dev/null 2>&1 || true
+          fi
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk '/"Developer ID Application/{print $2; exit}')
+          [[ -n "$identity" ]] || { echo "::error::no valid Developer ID Application identity in the certificate"; exit 1; }
+          echo "SIGN_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      # APPLE_TEAM_ID: the team that owns the certificate. Kept in a secret so no team ID is in the repo.
+      - name: Build signed Release app (arm64)
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          [[ -n "$APPLE_TEAM_ID" ]] || { echo "::error::APPLE_TEAM_ID is required"; exit 1; }
+          xcodebuild -project Laer.xcodeproj -scheme Laer -configuration Release \
+            -destination 'generic/platform=macOS' -derivedDataPath "$DD" \
+            -onlyUsePackageVersionsFromResolvedFile COMPILER_INDEX_STORE_ENABLE=NO \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Developer ID Application" \
+            OTHER_CODE_SIGN_FLAGS="--timestamp --keychain $SIGN_KEYCHAIN" \
+            CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
+            build | xcbeautify --renderer github-actions
+          echo "APP=$DD/Build/Products/Release/Laer.app" >> "$GITHUB_ENV"
+
+      # Sparkle's helpers arrive signed by their prebuilt package, which notarization rejects. Re-sign
+      # them inside out with the Developer ID, then the Quick Look helper, then the app around them.
+      - name: Re-sign nested code with Hardened Runtime
+        run: |
+          sign() { codesign --force --sign "$SIGN_IDENTITY" --keychain "$SIGN_KEYCHAIN" --options runtime --timestamp "$@"; }
+          sparkle="$APP/Contents/Frameworks/Sparkle.framework"
+          b="$sparkle/Versions/B"
+          [[ -d "$sparkle" ]] || { echo "::error::Sparkle.framework missing from Laer.app"; exit 1; }
+          sign "$b/XPCServices/Installer.xpc"
+          sign --preserve-metadata=entitlements "$b/XPCServices/Downloader.xpc"
+          sign "$b/Autoupdate"
+          sign "$b/Updater.app"
+          sign "$sparkle"
+          quicklook="$APP/Contents/XPCServices/LaerQuickLookService.xpc"
+          [[ -d "$quicklook" ]] || { echo "::error::LaerQuickLookService.xpc missing from Laer.app"; exit 1; }
+          sign --preserve-metadata=entitlements,requirements,flags "$quicklook"
+          sign --preserve-metadata=entitlements,requirements,flags "$APP"
+
+      - name: Verify code signatures
+        run: |
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          for code in "$APP" "$APP/Contents/XPCServices/LaerQuickLookService.xpc" \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" \
+            "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"; do
+            details=$(codesign -dvv "$code" 2>&1)
+            grep -q 'flags=.*runtime' <<<"$details" || { echo "::error::Hardened Runtime missing on ${code#$APP/}"; exit 1; }
+            grep -q '^Authority=Developer ID Application' <<<"$details" || { echo "::error::not Developer ID signed: ${code#$APP/}"; exit 1; }
+            grep -q '^Timestamp=' <<<"$details" || { echo "::error::no secure timestamp on ${code#$APP/}"; exit 1; }
+          done
+          codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -q 'com.apple.security.app-sandbox' \
+            || { echo "::error::Laer.app is not sandboxed"; exit 1; }
+          lipo -archs "$APP/Contents/MacOS/Laer"
+
+      - name: Create and sign disk image
+        run: |
+          stage="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$stage" "$OUT" && mkdir -p "$stage" "$OUT"
+          ditto "$APP" "$stage/Laer.app"
+          ln -s /Applications "$stage/Applications"
+          DMG="$OUT/Laer-$VERSION.dmg"
+          hdiutil create -volname Laer -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$DMG"
+          codesign --sign "$SIGN_IDENTITY" --keychain "$SIGN_KEYCHAIN" --timestamp "$DMG"
+          codesign --verify --strict --verbose=2 "$DMG"
+          rm -rf "$stage"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+      # Either an App Store Connect API key (NOTARY_API_KEY_P8_BASE64, NOTARY_API_KEY_ID,
+      # NOTARY_API_ISSUER_ID) or an Apple ID with an app-specific password (NOTARY_APPLE_ID,
+      # NOTARY_APP_PASSWORD, with APPLE_TEAM_ID).
+      - name: Notarize
+        env:
+          NOTARY_API_KEY_P8_BASE64: ${{ secrets.NOTARY_API_KEY_P8_BASE64 }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_APP_PASSWORD: ${{ secrets.NOTARY_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          umask 077
+          if [[ -n "$NOTARY_API_KEY_P8_BASE64" && -n "$NOTARY_API_KEY_ID" && -n "$NOTARY_API_ISSUER_ID" ]]; then
+            key="$SECRETS_DIR/AuthKey.p8"
+            printf '%s' "$NOTARY_API_KEY_P8_BASE64" | base64 --decode > "$key"
+            auth=(--key "$key" --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER_ID")
+          elif [[ -n "$NOTARY_APPLE_ID" && -n "$NOTARY_APP_PASSWORD" && -n "$APPLE_TEAM_ID" ]]; then
+            auth=(--apple-id "$NOTARY_APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$NOTARY_APP_PASSWORD")
+          else
+            echo "::error::configure an App Store Connect API key or an Apple ID app-specific password for notarytool"
+            exit 1
+          fi
+          result=$(xcrun notarytool submit "$DMG" "${auth[@]}" --wait --timeout 60m --output-format json) || true
+          id=$(jq -r '.id // empty' <<<"$result")
+          status=$(jq -r '.status // empty' <<<"$result")
+          echo "notarytool: submission ${id:-none}, status ${status:-unknown}"
+          # notarytool exits 0 for a finished submission whatever the verdict.
+          if [[ "$status" != "Accepted" ]]; then
+            [[ -n "$id" ]] && xcrun notarytool log "$id" "${auth[@]}" || true
+            echo "::error::notarization not accepted (${status:-no status})"
+            exit 1
+          fi
+          rm -f "$SECRETS_DIR/AuthKey.p8"
+
+      - name: Staple and assess with Gatekeeper
+        run: |
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
+          mnt="$RUNNER_TEMP/dmg-mount"
+          mkdir -p "$mnt"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$mnt"
+          trap 'hdiutil detach "$mnt" -quiet || true' EXIT
+          codesign --verify --deep --strict --verbose=2 "$mnt/Laer.app"
+          spctl --assess --verbose=4 --type exec "$mnt/Laer.app"
+          [[ -L "$mnt/Applications" ]]
+
+      # SPARKLE_ED_PRIVATE_KEY: the EdDSA private key exported with Sparkle's `generate_keys -x`.
+      # Without it the release still publishes, but installed copies are not offered the update.
+      - name: Generate signed Sparkle appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$SPARKLE_ED_PRIVATE_KEY" ]]; then
+            echo "::warning::SPARKLE_ED_PRIVATE_KEY is not set; no appcast.xml, so in-app updates will not see this release"
+            exit 0
+          fi
+          tool="$DD/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast"
+          [[ -x "$tool" ]] || { echo "::error::generate_appcast not found in the resolved Sparkle package"; exit 1; }
+          umask 077
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$SECRETS_DIR/sparkle_ed25519"
+          stage="$RUNNER_TEMP/appcast-stage"
+          rm -rf "$stage" && mkdir -p "$stage"
+          cp "$DMG" "$stage/"
+          "$tool" --ed-key-file "$SECRETS_DIR/sparkle_ed25519" \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/" \
+            --link "https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" \
+            -o "$OUT/appcast.xml" "$stage"
+          rm -f "$SECRETS_DIR/sparkle_ed25519"
+          rm -rf "$stage"
+          grep -q 'sparkle:edSignature=' "$OUT/appcast.xml" || { echo "::error::appcast.xml has no EdDSA signature"; exit 1; }
+
+      - name: Write SHA256SUMS
+        run: |
+          cd "$OUT"
+          files=("Laer-$VERSION.dmg")
+          [[ -f appcast.xml ]] && files+=(appcast.xml)
+          shasum -a 256 "${files[@]}" > SHA256SUMS
+          shasum -a 256 -c SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          # The disk image, SHA256SUMS and, when signed, appcast.xml: the only files in this folder.
+          subject-path: ${{ runner.temp }}/release-out/*
+
+      # A new release is a draft unless `publish` was chosen: Sparkle reads `releases/latest`, so
+      # installed copies see the update only once the draft is published.
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$OUT"
+          assets=("Laer-$VERSION.dmg" SHA256SUMS)
+          [[ -f appcast.xml ]] && assets+=(appcast.xml)
+          notes="$RUNNER_TEMP/release-notes.md"
+          if [[ -f "$GITHUB_WORKSPACE/CHANGELOG.md" ]]; then
+            awk -v v="$VERSION" '
+              $0 ~ "^## \\[" v "\\]" { on = 1; next }
+              on && /^## \[/ { exit }
+              on { print }
+            ' "$GITHUB_WORKSPACE/CHANGELOG.md" > "$notes"
+          fi
+          [[ -s "$notes" ]] || echo "Laer $VERSION." > "$notes"
+          {
+            echo
+            echo "## Verify"
+            echo
+            echo '```bash'
+            echo 'shasum -a 256 -c SHA256SUMS'
+            echo "gh attestation verify Laer-$VERSION.dmg --repo $GITHUB_REPOSITORY"
+            echo '```'
+          } >> "$notes"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            draft=(--draft)
+            [[ "$PUBLISH" == "true" ]] && draft=()
+            gh release create "$TAG" "${assets[@]}" "${draft[@]}" --verify-tag \
+              --title "Laer $VERSION" --notes-file "$notes" --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Remove signing material
+        if: always()
+        run: |
+          [[ -n "${SECRETS_DIR:-}" ]] && rm -rf "$SECRETS_DIR"
+          if [[ -n "${SIGN_KEYCHAIN:-}" && -f "$SIGN_KEYCHAIN" ]]; then
+            security delete-keychain "$SIGN_KEYCHAIN" || true
+          fi

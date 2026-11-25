@@ -78,65 +78,92 @@ extension AppModel {
         set {
             let trimmed = newValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             UserDefaults.standard.set(trimmed.isEmpty ? nil : trimmed, forKey: Self.examPlanKey)
+            cancelExamPlan()
             examPlan = ExamPlanState()
-            try? FileManager.default.removeItem(at: Self.examPlanFile)
+            try? FileManager.default.removeItem(at: examPlanFile)
             if !trimmed.isEmpty { Task { await loadExamPlan(force: true) } }
         }
     }
 
-    private static var examPlanFile: URL {
-        let support = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
-            ?? FileManager.default.temporaryDirectory
-        return support.appending(path: "Laer/ExamPlan.pdf")
+    private var examPlanFile: URL { examPlanRoot.appending(path: "ExamPlan.pdf") }
+
+    func cancelExamPlan() {
+        examPlanGeneration += 1
+        examPlanTask?.cancel()
+        examPlanTask = nil
+        if examPlan.phase == .loading { examPlan.phase = .idle }
     }
 
     /// Shows the saved copy at once and fetches a new one at most every twelve hours.
     /// A failed fetch keeps the saved copy.
     func loadExamPlan(force: Bool = false) async {
-        guard let address = examPlanAddress, let url = StudyLink(title: "", address: address).url else { return }
-        let file = Self.examPlanFile
+        guard case .ready = authState, !Task.isCancelled,
+              let address = examPlanAddress, let url = StudyLink(title: "", address: address).url else { return }
+        if !force, let examPlanTask {
+            await examPlanTask.value
+            return
+        }
+        cancelExamPlan()
+        let generation = examPlanGeneration
+        let session = CollectionSession(self)
+        let file = examPlanFile
+        let task = Task { await fetchExamPlan(url: url, file: file, force: force, session: session, generation: generation) }
+        examPlanTask = task
+        await task.value
+        if examPlanTask == task { examPlanTask = nil }
+    }
+
+    private func fetchExamPlan(url: URL, file: URL, force: Bool, session: CollectionSession, generation: Int) async {
+        func isCurrent() -> Bool { generation == examPlanGeneration && session.isCurrent(self) }
+        guard isCurrent() else { return }
         if examPlan.fileURL == nil, FileManager.default.fileExists(atPath: file.path) {
             examPlan.fileURL = file
             examPlan.fetchedAt = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            await matchExamPlan()
+            let matches = await matchExamPlan(file)
+            guard isCurrent() else { return }
+            examPlan.matches = matches
         }
         if !force, let last = examPlan.fetchedAt, Date().timeIntervalSince(last) < 12 * 60 * 60 { return }
-        guard examPlan.phase != .loading else { return }
         examPlan.phase = .loading
         do {
             let (data, response) = try await URLSession.shared.data(from: url)
+            guard isCurrent() else { return }
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { throw APIError.unexpectedStatus(0) }
-            // A sign-in page answered with 200 is not the plan.
             guard data.starts(with: Array("%PDF".utf8)) else { throw APIError.notJSON }
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: file, options: .atomic)
             examPlan.fileURL = file
             examPlan.fetchedAt = Date()
+            examPlan.matches = []
+            let matches = await matchExamPlan(file)
+            guard isCurrent() else { return }
+            examPlan.matches = matches
             examPlan.phase = .idle
-            await matchExamPlan()
         } catch {
+            guard isCurrent() else { return }
             Logger(subsystem: "app.laer.Laer", category: "exam-plan").notice("fetch failed: \(String(describing: type(of: error)), privacy: .public)")
             examPlan.phase = .failed(examPlan.fileURL == nil ? "The exam plan couldn't be fetched." : "Showing the saved copy. The update failed.")
         }
     }
 
-    /// Finds the pages that name each active course, off the main thread. Line breaks inside a
-    /// table cell are ignored, so a title split over two lines still matches.
-    private func matchExamPlan() async {
-        guard let file = examPlan.fileURL else { return }
+    /// Finds the pages that name each active course, off the main thread.
+    private func matchExamPlan(_ file: URL) async -> [ExamPlanMatch] {
         let titles = activeCourses.map { CourseTitle(id: $0.courseId, title: $0.shortTitle) }
-        examPlan.matches = await Task.detached(priority: .utility) { () -> [ExamPlanMatch] in
-            guard let document = PDFDocument(url: file) else { return [] }
-            let pages = (0..<document.pageCount).map { index in
-                Self.squeezed(document.page(at: index)?.string ?? "")
+        let task = Task.detached(priority: .utility) { () -> [ExamPlanMatch] in
+            guard !Task.isCancelled, let document = PDFDocument(url: file) else { return [] }
+            var pages: [String] = []
+            for index in 0..<document.pageCount {
+                guard !Task.isCancelled else { return [] }
+                pages.append(Self.squeezed(document.page(at: index)?.string ?? ""))
             }
             return titles.compactMap { course in
                 let needle = Self.squeezed(course.title)
-                guard needle.count >= 4 else { return nil }
+                guard !Task.isCancelled, needle.count >= 4 else { return nil }
                 let hits = pages.indices.filter { pages[$0].contains(needle) }
                 return hits.isEmpty ? nil : ExamPlanMatch(courseId: course.id, courseTitle: course.title, pages: hits)
             }
-        }.value
+        }
+        return await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
     }
 
     private nonisolated static func squeezed(_ text: String) -> String {
@@ -175,7 +202,16 @@ extension AppModel {
     }
 
     func open(_ asset: LocalAsset) {
-        guard let url = downloads?.fileURLIfPresent(for: asset) else { return }
-        viewerItem = ViewerItem(id: asset.id, title: asset.displayName, fileURL: url)
+        guard let downloads, let url = downloads.fileURLIfPresent(for: asset) else { return }
+        let item = ViewerItem(id: asset.id, title: asset.displayName, fileURL: url)
+        if !asset.isAutoPrefetched {
+            viewerItem = item
+            return
+        }
+        Task {
+            await keepSavedAsset(asset.id, store: downloads)
+            guard downloads === self.downloads, downloads.fileURLIfPresent(for: asset) != nil else { return }
+            viewerItem = item
+        }
     }
 }

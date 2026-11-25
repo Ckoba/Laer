@@ -221,20 +221,23 @@ struct ResourceRow: View {
     @ViewBuilder private var menu: some View {
         if let asset = model.savedAssets[resource.id] {
             Button("Open") { Task { await openSaved() } }
-            Button("Open in default app") {
-                Task {
-                    if let url = await model.savedFileURL(for: resource) { NSWorkspace.shared.open(url) }
+            // Only known document and media formats open directly; anything else is shown in Finder.
+            if DownloadStore.canOpenDirectlyInDefaultApp(pathExtension: (asset.relativePath as NSString).pathExtension) {
+                Button("Open in default app") {
+                    Task {
+                        if let url = await model.savedFileURL(for: resource, keep: true) { NSWorkspace.shared.open(url) }
+                    }
                 }
             }
             Button("Show in Finder") {
                 Task {
-                    if let url = await model.savedFileURL(for: resource) {
+                    if let url = await model.savedFileURL(for: resource, keep: true) {
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     }
                 }
             }
             Button("Export…") { Task { await export(asset) } }
-            Button("Save newer copy") { Task { await model.download(resource) } }
+            Button("Save newer copy") { Task { await model.download(resource, replaceExisting: true) } }
         } else if FileAcquirer.canAttempt(resource) {
             Button("Save") { Task { await model.download(resource) } }
         } else if canRead {
@@ -286,10 +289,10 @@ struct ResourceRow: View {
     }
 
     private func export(_ asset: LocalAsset) async {
-        guard let source = await model.savedFileURL(for: resource) else { return }
+        guard let source = await model.savedFileURL(for: resource, keep: true) else { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = asset.displayName
         guard panel.runModal() == .OK, let destination = panel.url else { return }
-        FileExport.copy(source, to: destination)
+        await FileExport.copy(source, to: destination)
     }
 }

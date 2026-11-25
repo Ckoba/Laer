@@ -1879,7 +1879,6 @@ private struct HomeGridLayout: Layout {
         frames.reserveCapacity(placements.count)
         for p in placements {
             let endRow = min(p.row + p.rowSpan, totalRows)
-            let spanCount = max(endRow - p.row, 1)
             let x = CGFloat(p.column) * (colWidth + columnSpacing)
             let y = p.row < totalRows ? rowY[p.row] : 0
             let w = CGFloat(p.columnSpan) * colWidth + CGFloat(max(p.columnSpan - 1, 0)) * columnSpacing

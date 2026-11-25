@@ -284,9 +284,12 @@ private struct FileMenu: View {
                 guard let named = ViewerFiles.namedCopy(of: source, title: item.title) else { return }
                 NSWorkspace.shared.activateFileViewerSelecting([named])
             }
-            Button("Open in default app") {
-                guard let original = item.fileURL, let named = ViewerFiles.namedCopy(of: original, title: item.title) else { return }
-                NSWorkspace.shared.open(named)
+            // Only known document and media formats open directly; anything else is shown in Finder.
+            if let original = item.fileURL, DownloadStore.canOpenDirectlyInDefaultApp(pathExtension: original.pathExtension) {
+                Button("Open in default app") {
+                    guard let named = ViewerFiles.namedCopy(of: original, title: item.title) else { return }
+                    NSWorkspace.shared.open(named)
+                }
             }
             Button("Export…") { export() }
         } label: {
@@ -320,10 +323,11 @@ private struct FileMenu: View {
         if choices.count > 1 { panel.accessoryView = picker.view }
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         // Turned pages leave the app as they look on screen.
-        if picker.selected.pathExtension.lowercased() == "pdf", let rotated = PDFControllers.rotatedDocument(picker.selected) {
-            FileExport.write(rotated, to: destination)
+        let selected = picker.selected
+        if selected.pathExtension.lowercased() == "pdf", let rotated = PDFControllers.rotatedDocument(selected) {
+            Task { await FileExport.write(rotated, from: selected, to: destination) }
         } else {
-            FileExport.copy(picker.selected, to: destination)
+            Task { await FileExport.copy(selected, to: destination) }
         }
     }
 }

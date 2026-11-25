@@ -125,7 +125,11 @@ struct LectureBriefOutput {
 @available(macOS 26, *)
 struct OnDeviceBriefWriter {
     var language: String?
+    #if compiler(>=6.4)
+    var options = GenerationOptions(samplingMode: .greedy)
+    #else
     var options = GenerationOptions(sampling: .greedy)
+    #endif
 
     private var languageName: String {
         guard let language, let name = Locale(identifier: "en").localizedString(forLanguageCode: language) else {

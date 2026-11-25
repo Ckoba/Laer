@@ -79,7 +79,11 @@ struct LaerCommands: Commands {
                 ))
             }
             Divider()
-            Button("Sign out") { Task { await model.signOut() } }
+            Button(model.hasVerifiedIdentity ? "Sign Out (Keep Offline Files)" : "Sign Out (Deletes Temporary Session Data)") {
+                Task { await model.signOut() }
+            }
+                .disabled(!isReady)
+            Button("Sign Out and Remove All Local Data") { model.confirmsRemovingLocalData = true }
                 .disabled(!isReady)
             Button("Change institution") { Task { await model.changeInstitution() } }
                 .disabled(model.site == nil)

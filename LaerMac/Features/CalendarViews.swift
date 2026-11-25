@@ -175,6 +175,22 @@ struct PersonalCalendarView: View {
     @State private var weekMemo = Memo<WeekKey, [ScheduleDay]>()
     @State private var events: [CalendarEvent] = []
     @State private var loadedWeek: Date?
+    @State private var loadedSession: CollectionSession?
+    @State private var activeRequest: UUID?
+    @State private var failure: (request: WeekRequest, message: String)?
+    @State private var isIncomplete = false
+
+    private struct WeekRequest: Equatable {
+        var week: Date
+        var session: CollectionSession
+    }
+
+    private var request: WeekRequest {
+        WeekRequest(week: weekStart, session: CollectionSession(model))
+    }
+
+    private var isShowingWeek: Bool { loadedWeek == weekStart && loadedSession == request.session }
+    private var visibleEvents: [CalendarEvent] { isShowingWeek ? events : [] }
     @State private var mode: CalendarMode = .week
     @State private var selectedDay = Calendar.current.startOfDay(for: Date())
 
@@ -182,7 +198,7 @@ struct PersonalCalendarView: View {
         VStack(alignment: .leading, spacing: 0) {
             PageHeader(title: weekTitle) {
                 HStack(spacing: Space.s8) {
-                    if loadedWeek != weekStart { Spinner() }
+                    if activeRequest != nil, !isShowingWeek { Spinner() }
                     SectionTabs(
                         selection: $mode,
                         items: CalendarMode.allCases.map { ($0, $0.label) },
@@ -197,17 +213,30 @@ struct PersonalCalendarView: View {
             .padding(.leading, Space.page)
             .padding(.trailing, Space.page)
             .padding(.top, Space.page)
+            if let failure, failure.request == request {
+                HStack(spacing: Space.s8) {
+                    ErrorLine(failure.message)
+                    TextButton("Retry") { Task { await load() } }
+                        .disabled(activeRequest != nil)
+                }
+                .padding(.horizontal, Space.page)
+            } else if isShowingWeek, isIncomplete {
+                Text("Partial week")
+                    .font(Type.t11)
+                    .foregroundStyle(Color.textMuted)
+                    .padding(.horizontal, Space.page)
+            }
             if case .event(let id) = navigation.searchTarget?.destination, let hit = navigation.searchTarget {
                 PageScroll {
                     Button("Show calendar", systemImage: Symbol.back) { navigation.searchTarget = nil }
-                    if let event = events.first(where: { $0.eventId == id }) {
+                    if let event = visibleEvents.first(where: { $0.eventId == id }) {
                         EventRow(event: event, showsLocation: true)
                             .padding(.horizontal, -Space.s8)
                     } else {
                         Text(hit.title).font(Type.t13)
                         if let date = hit.date { Text(date, style: .date) }
                         if let detail = hit.detail { Text(detail) }
-                        Text(loadedWeek == weekStart ? "Showing indexed details" : "Loading event…")
+                        Text(activeRequest == nil || isShowingWeek ? "Showing indexed details" : "Loading event…")
                             .font(Type.t11)
                             .foregroundStyle(Color.textMuted)
                     }
@@ -223,7 +252,7 @@ struct PersonalCalendarView: View {
         .onChange(of: mode) { _, mode in
             if mode == .day { weekStart = Self.start(of: selectedDay) }
         }
-        .task(id: weekStart) { await load() }
+        .task(id: request) { await load() }
         .task(id: navigation.searchTarget?.id) {
             guard navigation.searchTarget?.kind == .event, let date = navigation.searchTarget?.date else { return }
             selectedDay = Calendar.current.startOfDay(for: date)
@@ -233,20 +262,39 @@ struct PersonalCalendarView: View {
     }
 
     private func load() async {
-        let week = weekStart
-        // Saved events show first, with no spinner; the network answer replaces them.
-        if loadedWeek != week {
-            let cached = await model.cachedEvents(weekContaining: week)
-            guard week == weekStart else { return }
-            if !cached.isEmpty {
-                events = cached
-                loadedWeek = week
-            }
+        guard !Task.isCancelled else { return }
+        let target = request
+        let id = UUID()
+        activeRequest = id
+        if loadedSession != target.session {
+            loadedSession = target.session
+            loadedWeek = nil
+            events = []
         }
-        let found = await model.events(weekContaining: week)
-        guard week == weekStart else { return }
-        events = found
-        loadedWeek = week
+        failure = nil
+        defer { if activeRequest == id { activeRequest = nil } }
+
+        func isCurrent() -> Bool { !Task.isCancelled && activeRequest == id && target == request }
+
+        if !isShowingWeek, let cached = await model.cachedWeekEvents(weekContaining: target.week) {
+            guard isCurrent() else { return }
+            events = cached.records
+            loadedWeek = target.week
+            isIncomplete = cached.coverage == .incomplete
+        }
+        guard isCurrent() else { return }
+        let result = await model.loadWeekEvents(weekContaining: target.week)
+        guard isCurrent() else { return }
+        switch result {
+        case .loaded(let items, let complete):
+            events = items
+            loadedWeek = target.week
+            isIncomplete = !complete
+        case .failed(let message):
+            failure = (target, message)
+        case .cancelled:
+            break
+        }
     }
 
     private func shift(_ steps: Int) {
@@ -282,8 +330,8 @@ struct PersonalCalendarView: View {
     }
 
     private var weekDays: [ScheduleDay] {
-        weekMemo.value(for: WeekKey(events: events, weekStart: weekStart)) {
-            WeekSchedule.days(events: events, weekContaining: weekStart, calendar: Calendar.current)
+        weekMemo.value(for: WeekKey(events: visibleEvents, weekStart: weekStart)) {
+            WeekSchedule.days(events: visibleEvents, weekContaining: weekStart, calendar: Calendar.current)
         }
     }
 
