@@ -177,8 +177,12 @@ public actor RefreshCoordinator {
                     transientRetries += 1
                     try await sleep(delay)
                 case .throttled(let retryAfter):
-                    let wait = retryAfter.map { Duration.seconds($0) } ?? policy.baseDelay
-                    if throttledOnce || wait > policy.maxRetryAfter {
+                    let wait: Duration? = if let retryAfter, retryAfter >= 0 {
+                        retryAfter < Double(Int64.max) ? .seconds(retryAfter) : nil
+                    } else {
+                        policy.baseDelay
+                    }
+                    guard !throttledOnce, let wait, wait <= policy.maxRetryAfter else {
                         isPaused = true
                         throw RefreshError.paused
                     }

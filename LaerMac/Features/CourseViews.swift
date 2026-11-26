@@ -283,7 +283,10 @@ struct PlansView: View {
         let groups = groupMemo.value(for: TopicKey(plans: items, topics: topics, minute: currentMinute())) {
             PlanTopics.groups(items, topics: topics, now: Date())
         }
-        PageScroll(spacing: 0, lazy: true) {
+        // Eager, not lazy: a course has few plans, and its current plan, briefs and open topics are
+        // tall rows whose height follows the width. When the file panel opened beside a scrolled
+        // list, LazyVStack kept re-placing those rows and the window froze.
+        PageScroll(spacing: 0) {
             FreshnessLine(state: state)
             if case .plan(let courseId, let planId) = navigation.searchTarget?.destination, courseId == course.courseId {
                 if let plan = items.first(where: { $0.planId == planId }) {

@@ -30,7 +30,9 @@ struct MainView: View {
     }
 
     private var clampedSidebarWidth: CGFloat {
-        min(max(CGFloat(sidebarWidth), Size.sidebarMin), Size.sidebarMax)
+        // A damaged preference must not reach layout or the `Int` in the resize handle's value.
+        guard sidebarWidth.isFinite else { return Size.sidebar }
+        return min(max(CGFloat(sidebarWidth), Size.sidebarMin), Size.sidebarMax)
     }
 
     var body: some View {
@@ -64,8 +66,12 @@ struct MainView: View {
         .onAppear { navigation.start(model) }
         .onChange(of: navigation.place(model)) { navigation.record() }
         .onChange(of: model.snapshots.map(ObjectIdentifier.init)) { navigation.start(model) }
-        .onPreferenceChange(UnsentDraftKey.self) { [navigation] hasDraft in
-            MainActor.assumeIsolated { navigation.hasDraft = hasDraft }
+        .onPreferenceChange(UnsentDraftKey.self) { @Sendable [navigation] hasDraft in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { navigation.hasDraft = hasDraft }
+            } else {
+                DispatchQueue.main.async { navigation.hasDraft = hasDraft }
+            }
         }
         .alert(
             "Discard your draft?",
@@ -384,7 +390,8 @@ private struct SidebarResizeHandle: View {
     private static let step: Double = 24
 
     private func clamped(_ value: Double) -> Double {
-        min(max(value, Double(Size.sidebarMin)), Double(Size.sidebarMax))
+        guard value.isFinite else { return Double(Size.sidebar) }
+        return min(max(value, Double(Size.sidebarMin)), Double(Size.sidebarMax))
     }
 
     private func reset() { width = Double(Size.sidebar) }

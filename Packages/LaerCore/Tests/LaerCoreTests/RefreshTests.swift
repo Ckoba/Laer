@@ -161,15 +161,29 @@ private func waitUntil(_ condition: @Sendable () async -> Bool) async {
         #expect(try await coordinator.run(key: "other", generation: 1) { 1 } == 1)
     }
 
-    @Test func excessiveRetryAfterPausesImmediately() async throws {
+    @Test(arguments: [3600.0, 1e300, .infinity])
+    func excessiveRetryAfterPausesImmediately(seconds: TimeInterval) async throws {
         let log = SleepLog()
         let coordinator = makeCoordinator(log)
         await #expect(throws: RefreshError.paused) {
             try await coordinator.run(key: "k", generation: 1) { () async throws -> Int in
-                throw APIError.throttled(retryAfter: 3600)
+                throw APIError.throttled(retryAfter: seconds)
             }
         }
         #expect(await log.durations.isEmpty)
+    }
+
+    @Test(arguments: [TimeInterval.nan, -1e300])
+    func invalidRetryAfterUsesBaseDelay(seconds: TimeInterval) async throws {
+        let log = SleepLog()
+        let coordinator = makeCoordinator(log)
+        let calls = Counter()
+        let result = try await coordinator.run(key: "courses", generation: 1) { () async throws -> Int in
+            if await calls.increment() == 1 { throw APIError.throttled(retryAfter: seconds) }
+            return 9
+        }
+        #expect(result == 9)
+        #expect(await log.durations == [.seconds(1)])
     }
 
     @Test func invalidateAllDetachesEveryWaiterAndRejectsTheOldGeneration() async throws {

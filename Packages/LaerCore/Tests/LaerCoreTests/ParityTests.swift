@@ -244,6 +244,19 @@ private func page(_ items: String, total: Int) -> String {
 }
 
 @Suite struct RichTextTests {
+    @Test func orderedListNumbersStayInRange() {
+        let html = """
+        <ol start="\(Int.min)"><li>First</li><li>Second</li></ol>
+        <ol><li value="\(Int.max)">Third</li><li>Fourth</li></ol>
+        """
+        #expect(RichText.blocks(fromHTML: html) == [
+            .listItem(ordered: true, number: Int.min, depth: 0, runs: [RichRun(text: "First")]),
+            .listItem(ordered: true, number: Int.min + 1, depth: 0, runs: [RichRun(text: "Second")]),
+            .listItem(ordered: true, number: Int.max, depth: 0, runs: [RichRun(text: "Third")]),
+            .listItem(ordered: true, number: Int.max, depth: 0, runs: [RichRun(text: "Fourth")]),
+        ])
+    }
+
     @Test func paragraphsHeadingsAndInlineStyles() {
         let blocks = RichText.blocks(fromHTML: "<h2>Week&nbsp;two</h2><p>Read <b>chapter 3</b> and <a href=\"https://example.itslearning.com/x\">this</a>.</p><p>  </p>")
         #expect(blocks.count == 2)

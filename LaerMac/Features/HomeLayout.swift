@@ -181,7 +181,9 @@ struct HomeLayout: Codable, Equatable {
             } else {
                 size = block.defaultSize
             }
-            positions = try c.decodeIfPresent([String: HomeGridCell].self, forKey: .positions) ?? [:]
+            let saved = try c.decodeIfPresent([String: HomeGridCell].self, forKey: .positions) ?? [:]
+            // Placement and rendering allocate one entry per row.
+            positions = saved.filter { $0.value.row <= 1_000 }
         }
 
         func encode(to encoder: Encoder) throws {

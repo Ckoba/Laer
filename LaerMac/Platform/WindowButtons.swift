@@ -67,7 +67,7 @@ struct WindowButtonWatch: NSViewRepresentable {
             }
             for view in watched {
                 view.postsFrameChangedNotifications = true
-                observers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: view, queue: nil) { [weak self] _ in
+                observers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: view, queue: nil) { @Sendable [weak self] _ in
                     guard Thread.isMainThread else { return }
                     MainActor.assumeIsolated { self?.align() }
                 })
@@ -80,7 +80,7 @@ struct WindowButtonWatch: NSViewRepresentable {
             ]
             for name in windowNames {
                 let isFullScreenExit = name == NSWindow.didExitFullScreenNotification
-                observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: nil) { [weak self] _ in
+                observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: nil) { @Sendable [weak self] _ in
                     guard Thread.isMainThread else { return }
                     MainActor.assumeIsolated {
                         self?.align()
@@ -90,7 +90,7 @@ struct WindowButtonWatch: NSViewRepresentable {
                     }
                 })
             }
-            titleObservation = window.observe(\.title, options: [.new]) { [weak self] _, _ in
+            titleObservation = window.observe(\.title, options: [.new]) { @Sendable [weak self] _, _ in
                 guard Thread.isMainThread else { return }
                 MainActor.assumeIsolated { self?.align() }
             }

@@ -53,10 +53,21 @@ final class OfficePDFConverter: NSObject, WKNavigationDelegate {
         let view = makeRenderView()
         view.loadHTMLString("", baseURL: nil)
         let connection = makeConnection()
-        let service = connection.remoteObjectProxyWithErrorHandler { _ in } as? QuickLookPreviewing
-        service?.preparePreview {}
+        prepareService(on: connection)
         preparation = Preparation(view: view, connection: connection)
         Perf.mark("office renderer preparation started")
+    }
+
+    static func prepareService(
+        on connection: NSXPCConnection, completion: @escaping @Sendable (Bool) -> Void = { _ in }
+    ) {
+        // XPC delivers errors and replies on its connection queue.
+        let proxy = connection.remoteObjectProxyWithErrorHandler { @Sendable _ in completion(false) }
+        guard let service = proxy as? QuickLookPreviewing else {
+            completion(false)
+            return
+        }
+        service.preparePreview { @Sendable in completion(true) }
     }
 
     static func cancelConversions() {
@@ -378,11 +389,7 @@ final class OfficePDFConverter: NSObject, WKNavigationDelegate {
         let store = WKContentRuleListStore.default()
         let identifier = "LaerOfficeLocalOnly-1"
         guard let store else { return nil }
-        let list = await withCheckedContinuation { (continuation: CheckedContinuation<WKContentRuleList?, Never>) in
-            store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: localOnlyRuleSource) { list, _ in
-                continuation.resume(returning: list)
-            }
-        }
+        let list = try? await store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: localOnlyRuleSource)
         localOnlyRuleList = list
         return list
     }

@@ -4,6 +4,15 @@ Notable changes to Laer are listed here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [0.1.62] - 2026-11-26
+
+Crash fixes.
+
+- Signing in through the browser no longer quits Laer as the sign-in returns, which also left you signed out on the next launch.
+- Opening a file from a course's plans no longer freezes the window.
+- Office previews no longer quit Laer when the preview helper fails or disconnects.
+- Guards against crashes from unusual server retry delays, extreme list numbering in course text, and damaged saved layout or sidebar settings.
+
 ## [0.1.6] - 2026-11-25
 
 Bug fixes and polish.
@@ -61,7 +70,8 @@ Bug fixes and polish.
 - Opt-in lecture briefs, made on your Mac with Apple Intelligence.
 - A menu bar icon with upcoming lectures.
 
-[Unreleased]: https://github.com/Ckoba/Laer/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/Ckoba/Laer/compare/v0.1.62...HEAD
+[0.1.62]: https://github.com/Ckoba/Laer/releases/tag/v0.1.62
 [0.1.6]: https://github.com/Ckoba/Laer/releases/tag/v0.1.6
 [0.1.5]: https://github.com/Ckoba/Laer/releases/tag/v0.1.5
 [0.1.4]: https://github.com/Ckoba/Laer/releases/tag/v0.1.4

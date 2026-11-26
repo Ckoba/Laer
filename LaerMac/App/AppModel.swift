@@ -415,9 +415,9 @@ final class AppModel {
             signInStatus = "Couldn’t start sign-in. Try again."
             return
         }
-        let session = ASWebAuthenticationSession(url: url, callbackURLScheme: OAuthClient.redirectScheme) { [weak self] redirect, error in
-            let didCancel = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
-            Task { @MainActor [weak self] in
+        let session = ASWebAuthenticationSession(
+            url: url, callbackURLScheme: OAuthClient.redirectScheme,
+            completionHandler: Self.oauthCompletion { [weak self] redirect, didCancel in
                 guard let self, self.isCurrentAuth(attempt) else { return }
                 defer {
                     if self.authGeneration == attempt {
@@ -431,7 +431,7 @@ final class AppModel {
                 }
                 await self.finishOAuth(redirect: redirect, site: site, state: state, pkce: pkce, attempt: attempt)
             }
-        }
+        )
         session.presentationContextProvider = oauthPresentation
         session.prefersEphemeralWebBrowserSession = false
         oauthSession = session
@@ -439,6 +439,19 @@ final class AppModel {
             oauthSession = nil
             isSigningIn = false
             signInStatus = "Couldn’t open sign-in. Try again."
+        }
+    }
+
+    /// The browser sign-in's completion handler. AuthenticationServices may call it on a background
+    /// queue (Safari's launch agent replies over XPC), so it is built outside the main actor: a closure
+    /// written inside `AppModel` would be main-actor isolated, and Swift's executor check would end the
+    /// app the moment sign-in returned. `deliver` runs on the main actor.
+    nonisolated static func oauthCompletion(
+        _ deliver: @escaping @MainActor @Sendable (_ redirect: URL?, _ didCancel: Bool) async -> Void
+    ) -> @Sendable (URL?, (any Error)?) -> Void {
+        { redirect, error in
+            let didCancel = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
+            Task { @MainActor in await deliver(redirect, didCancel) }
         }
     }
 

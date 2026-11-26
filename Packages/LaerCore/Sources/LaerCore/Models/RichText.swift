@@ -129,7 +129,7 @@ public enum RichText {
 
     private struct ListContext {
         var ordered: Bool
-        var counter = 0
+        var nextNumber = 1
     }
 
     /// Inline styling an open tag adds; nil leaves the outer style alone.
@@ -281,19 +281,17 @@ public enum RichText {
             case ("ul", false), ("ol", false):
                 flush()
                 let start = attributes["start"].flatMap { Int($0.trimmingCharacters(in: .whitespaces)) } ?? 1
-                lists.append(ListContext(ordered: name == "ol", counter: start - 1))
+                lists.append(ListContext(ordered: name == "ol", nextNumber: start))
             case ("ul", true), ("ol", true):
                 flush()
                 if !lists.isEmpty { lists.removeLast() }
             case ("li", false):
                 flush()
-                if !lists.isEmpty {
-                    if let value = attributes["value"].flatMap({ Int($0.trimmingCharacters(in: .whitespaces)) }) {
-                        lists[lists.count - 1].counter = value
-                    } else {
-                        lists[lists.count - 1].counter += 1
-                    }
-                    itemNumber = lists[lists.count - 1].counter
+                if let index = lists.indices.last {
+                    let value = attributes["value"].flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+                    let number = value ?? lists[index].nextNumber
+                    itemNumber = number
+                    lists[index].nextNumber = number < Int.max ? number + 1 : Int.max
                 } else {
                     itemNumber = 1
                 }
